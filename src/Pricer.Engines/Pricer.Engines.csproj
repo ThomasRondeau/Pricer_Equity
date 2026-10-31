@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Pricer.Core\Pricer.Core.csproj" />
+    <ProjectReference Include="..\Pricer.Market\Pricer.Market.csproj" />
+    <ProjectReference Include="..\Pricer.Instruments\Pricer.Instruments.csproj" />
+    <ProjectReference Include="..\Pricer.Models\Pricer.Models.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
