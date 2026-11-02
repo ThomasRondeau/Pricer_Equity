@@ -29,7 +29,7 @@ public sealed record ConstantExpr(double Value) : PayoffExpr
     public override bool IsContinuous => true;
 }
 
-public sealed record SpotExpr : PayoffExpr
+public sealed record SpotExpr(int Asset = 0) : PayoffExpr
 {
     public override bool IsContinuous => true;
 }
@@ -79,6 +79,71 @@ public sealed record PayoffProgram(ImmutableArray<PayoffEvent> Events, int Slots
     public bool IsContinuous => Events.All(e => e.IsContinuous);
 }
 
+/// <param name="Slots">Variables as of the end of the valuation date.</param>
+/// <param name="Realised">Cash paid strictly before the valuation date, per unit of trade.</param>
+/// <param name="DueToday">Cash paid on the valuation date; still part of the value.</param>
+/// <param name="Remaining">Events left to simulate; none when the trade has ended.</param>
+public sealed record ReplayResult(double[] Slots, double Realised, double DueToday, ImmutableArray<PayoffEvent> Remaining);
+
+/// <summary>Runs a program over its past: this is the whole of the trade's life cycle, with no logic
+/// specific to a product. A fixing missing on the valuation date falls back on the current spot.</summary>
+public static class PayoffReplay
+{
+    public static ReplayResult Run(
+        PayoffProgram program, ImmutableArray<string> underlyings, DateOnly valuation, TradeState? state, Func<string, double> spot)
+    {
+        var fixings = (state?.Fixings ?? []).ToDictionary(f => (f.Underlying, f.Date), f => f.Level);
+        double[] slots = new double[program.Slots];
+        double realised = 0, dueToday = 0;
+        bool alive = true;
+
+        double Level(string underlying, DateOnly date)
+        {
+            if (fixings.TryGetValue((underlying, date), out double level)) return level;
+            return date == valuation
+                ? spot(underlying)
+                : throw new InvalidOperationException($"Fixing manquant : {underlying} au {date:yyyy-MM-dd}.");
+        }
+
+        double Evaluate(PayoffExpr expr, DateOnly date) => expr switch
+        {
+            ConstantExpr c => c.Value,
+            SpotExpr s => Level(underlyings[s.Asset], date),
+            SlotExpr s => slots[s.Index],
+            StepExpr s => Evaluate(s.Argument, date) >= 0 ? 1 : 0,
+            BinaryExpr b => Apply(b.Op, Evaluate(b.Left, date), Evaluate(b.Right, date)),
+            _ => throw new NotSupportedException(expr.GetType().Name),
+        };
+
+        var ordered = program.Events.OrderBy(e => e.Date).ToArray();
+        int next = 0;
+        for (; next < ordered.Length && ordered[next].Date <= valuation && alive; next++)
+        {
+            switch (ordered[next])
+            {
+                case StoreEvent e: slots[e.Slot] = Evaluate(e.Value, e.Date); break;
+                case TerminateEvent e: alive = Evaluate(e.Condition, e.Date) == 0; break;
+                case PayEvent e:
+                    double amount = Evaluate(e.Amount, e.Date);
+                    if (e.Date < valuation) realised += amount;
+                    else dueToday += amount;
+                    break;
+            }
+        }
+        return new ReplayResult(slots, realised, dueToday, alive ? [.. ordered[next..]] : []);
+    }
+
+    private static double Apply(BinaryOp op, double a, double b) => op switch
+    {
+        BinaryOp.Add => a + b,
+        BinaryOp.Subtract => a - b,
+        BinaryOp.Multiply => a * b,
+        BinaryOp.Max => Math.Max(a, b),
+        BinaryOp.Min => Math.Min(a, b),
+        _ => throw new ArgumentOutOfRangeException(nameof(op)),
+    };
+}
+
 public static class PayoffCompiler
 {
     /// <summary>Broadie-Glasserman-Kou: a daily check misses crossings, so the barrier moves towards spot to mimic continuous monitoring.</summary>
@@ -86,12 +151,16 @@ public static class PayoffCompiler
     private const double DaysPerYear = 365.0;
 
     /// <param name="vol">Lognormal vol, used only to correct the barrier for discrete monitoring.</param>
-    public static PayoffProgram Compile(Instrument instrument, DateOnly valuation, double spot, double vol) => instrument switch
+    public static PayoffProgram Compile(
+        Instrument instrument, DateOnly valuation, double spot, double vol, TradeState? state = null) => instrument switch
     {
         EuropeanOption o => new([new PayEvent(o.Expiry, Vanilla(o))], 0),
         DigitalOption o => new([new PayEvent(o.Expiry, Digital(o))], 0),
-        AsianOption o => Asian(o, valuation),
-        BarrierOption o => Barrier(o, valuation, spot, vol),
+        AsianOption o => Asian(o),
+        BarrierOption o => Barrier(o, valuation, spot, vol, state?.BarrierBreached ?? false),
+        ReverseConvertible n => ReverseConvertibleProgram(n),
+        Autocall n => AutocallProgram(n),
+        Phoenix n => PhoenixProgram(n),
         _ => throw new NotSupportedException($"Aucun payoff de trajectoire pour {instrument.GetType().Name}."),
     };
 
@@ -100,7 +169,6 @@ public static class PayoffCompiler
     {
         DigitalOption d => d.Sign * (spot - d.Strike) >= 0 ? d.Cash : 0,
         BarrierOption b when b.IsOut == b.IsBreachedAt(spot) => 0,
-        AsianOption => throw new NotSupportedException("Fixings passés : pris en charge avec l'état de vie (phase 4)."),
         _ => Math.Max(option.Sign * (spot - option.Strike), 0),
     };
 
@@ -109,13 +177,9 @@ public static class PayoffCompiler
     private static PayoffExpr Digital(DigitalOption o) =>
         (PayoffExpr)o.Cash * new StepExpr((PayoffExpr)o.Sign * (new SpotExpr() - o.Strike), o.Strike);
 
-    private static PayoffProgram Asian(AsianOption o, DateOnly valuation)
+    private static PayoffProgram Asian(AsianOption o)
     {
         if (o.Fixings < 1) throw new ArgumentException("Il faut au moins un fixing.");
-        if (o.AveragingStart <= valuation)
-        {
-            throw new NotSupportedException("Fixings passés : pris en charge avec l'état de vie (phase 4).");
-        }
 
         var events = ImmutableArray.CreateBuilder<PayoffEvent>();
         var slot = new SlotExpr(0);
@@ -131,9 +195,73 @@ public static class PayoffCompiler
         return new(events.ToImmutable(), 1);
     }
 
-    private static PayoffProgram Barrier(BarrierOption o, DateOnly valuation, double spot, double vol)
+    private static PayoffExpr Performance(StructuredNote note)
     {
-        if (o.IsBreachedAt(spot))
+        if (note is WorstOfPhoenix worst)
+        {
+            return worst.Basket.Select((leg, i) => (PayoffExpr)(1 / leg.InitialFixing) * new SpotExpr(i)).Aggregate(PayoffExpr.Min);
+        }
+        return (PayoffExpr)(1 / note.InitialFixing) * new SpotExpr();
+    }
+
+    /// <summary>1 if the performance is at or above a barrier.</summary>
+    private static PayoffExpr Above(PayoffExpr performance, double barrier) => new StepExpr(performance - barrier, 1);
+
+    private static PayoffExpr Redemption(StructuredNote note, PayoffExpr performance)
+    {
+        var safe = Above(performance, note.Protection);
+        return (PayoffExpr)note.Notional * (safe + ((PayoffExpr)1.0 - safe) * performance);
+    }
+
+    private static PayoffProgram ReverseConvertibleProgram(ReverseConvertible n)
+    {
+        var events = ImmutableArray.CreateBuilder<PayoffEvent>();
+        foreach (var date in n.Observations()) events.Add(new PayEvent(date, n.Notional * n.Coupon));
+        events.Add(new PayEvent(n.Expiry, Redemption(n, Performance(n))));
+        return new(events.ToImmutable(), 0);
+    }
+
+    private static PayoffProgram AutocallProgram(Autocall n)
+    {
+        var performance = Performance(n);
+        var called = Above(performance, n.CallBarrier);
+        var dates = n.Observations();
+        var events = ImmutableArray.CreateBuilder<PayoffEvent>();
+        for (int i = 0; i < dates.Length; i++)
+        {
+            events.Add(new PayEvent(dates[i], (PayoffExpr)(n.Notional * (1 + (i + 1) * n.Coupon)) * called));
+            if (i < dates.Length - 1) events.Add(new TerminateEvent(dates[i], called));
+        }
+        events.Add(new PayEvent(n.Expiry, ((PayoffExpr)1.0 - called) * Redemption(n, performance)));
+        return new(events.ToImmutable(), 0);
+    }
+
+    private static PayoffProgram PhoenixProgram(Phoenix n)
+    {
+        var performance = Performance(n);
+        var earned = Above(performance, n.CouponBarrier);
+        var called = Above(performance, n.CallBarrier);
+        var missed = new SlotExpr(0);
+        var dates = n.Observations();
+        var events = ImmutableArray.CreateBuilder<PayoffEvent>();
+        for (int i = 0; i < dates.Length; i++)
+        {
+            PayoffExpr periods = n.Memory ? (PayoffExpr)1.0 + missed : 1.0;
+            events.Add(new PayEvent(dates[i], (PayoffExpr)(n.Notional * n.Coupon) * earned * periods));
+            events.Add(new StoreEvent(dates[i], 0, ((PayoffExpr)1.0 - earned) * ((PayoffExpr)1.0 + missed)));
+            if (i < dates.Length - 1)
+            {
+                events.Add(new PayEvent(dates[i], (PayoffExpr)n.Notional * called));
+                events.Add(new TerminateEvent(dates[i], called));
+            }
+        }
+        events.Add(new PayEvent(n.Expiry, Redemption(n, performance)));
+        return new(events.ToImmutable(), 1);
+    }
+
+    private static PayoffProgram Barrier(BarrierOption o, DateOnly valuation, double spot, double vol, bool breached)
+    {
+        if (breached || o.IsBreachedAt(spot))
         {
             return o.IsOut ? new([], 0) : new([new PayEvent(o.Expiry, Vanilla(o))], 0);
         }

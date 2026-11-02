@@ -15,9 +15,9 @@ internal sealed class PayoffEvaluator
     private readonly Stack<Column> _free = new();
     private readonly Column?[] _slots;
     private readonly Column _alive;
-    private readonly Column _spot;
+    private readonly Column[] _spots;
 
-    public PayoffEvaluator(int slots, int length, int tangents, double smoothing)
+    public PayoffEvaluator(int slots, int assets, int length, int tangents, double smoothing)
     {
         _length = length;
         _tangents = tangents;
@@ -26,7 +26,8 @@ internal sealed class PayoffEvaluator
         _alive = Rent();
         Array.Fill(_alive.Value, 1.0);
         Cash = Rent();
-        _spot = Rent();
+        _spots = new Column[assets];
+        for (int i = 0; i < assets; i++) _spots[i] = Rent();
         for (int i = 0; i < slots; i++) _slots[i] = Rent();
     }
 
@@ -35,7 +36,13 @@ internal sealed class PayoffEvaluator
     public double[] Tangent(int index) => Cash.Tangents[index];
 
     /// <summary>Hands over the spot column of the current date; tangents are filled by the caller.</summary>
-    public (double[] Spot, double[][] Tangents) SpotBuffers() => (_spot.Value, _spot.Tangents);
+    public (double[] Spot, double[][] Tangents) SpotBuffers(int asset) => (_spots[asset].Value, _spots[asset].Tangents);
+
+    /// <summary>Starts the variables from the state replayed out of the trade's past.</summary>
+    public void Seed(double[] slots)
+    {
+        for (int i = 0; i < slots.Length; i++) Array.Fill(_slots[i]!.Value, slots[i]);
+    }
 
     public void Run(PayoffEvent @event, double discount)
     {
@@ -74,7 +81,7 @@ internal sealed class PayoffEvaluator
     private Column Evaluate(PayoffExpr expr) => expr switch
     {
         ConstantExpr c => Filled(c.Value),
-        SpotExpr => Copy(_spot),
+        SpotExpr s => Copy(_spots[s.Asset]),
         SlotExpr s => Copy(_slots[s.Index]!),
         BinaryExpr b => Apply(b.Op, Evaluate(b.Left), Evaluate(b.Right)),
         StepExpr s => Step(Evaluate(s.Argument), s.Scale),

@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Pricer.Risk\Pricer.Risk.csproj" />
     <ProjectReference Include="..\..\src\Pricer.Data\Pricer.Data.csproj" />
+    <ProjectReference Include="..\..\src\Pricer.Book\Pricer.Book.csproj" />
   </ItemGroup>
 
 </Project>

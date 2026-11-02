@@ -40,6 +40,10 @@ public sealed class BlackScholesAnalyticEngine : IPricingEngine
                 double t = DayCount.Act365F.YearFraction(request.ValuationDate, option.Expiry);
                 if (t < 0) return Result(0, [.. request.Measures.Select(m => Greek(m, 0))]);
                 var inputs = EngineInputs.For(option, request, t);
+                if (option is BarrierOption { IsOut: var isOut } && request.Trade.State?.BarrierBreached == true)
+                {
+                    return isOut ? Result(0, []) : European(request, inputs, option, quantity);
+                }
 
                 return option switch
                 {
@@ -93,11 +97,16 @@ public sealed class BlackScholesAnalyticEngine : IPricingEngine
 public static class EngineInputs
 {
     /// <summary>Black-Scholes inputs for an option: zero rates and implied vol at its strike and expiry.
-    /// A single vol ignores the smile along a path-dependent payoff; local vol comes with phase 4.</summary>
-    public static BlackScholesInputs For(OptionInstrument option, PricingRequest request, double t)
+    /// A single vol ignores the smile along a path-dependent payoff.</summary>
+    public static BlackScholesInputs For(Instrument instrument, PricingRequest request, double t)
     {
-        var market = request.Market.Underlying(option.Underlying);
-        double vol = market.Vol.Vol(option.Strike, t) + ((BlackScholesConfig)request.Model).VolAdjustment;
-        return new(market.Spot, option.Strike, t, vol, request.Market.DiscountCurve.ZeroRate(t), market.DividendCurve.ZeroRate(t));
+        double strike = ((IDatedProduct)instrument).ReferenceStrike;
+        var market = request.Market.Underlying(instrument.Underlying);
+        double adjustment = request.Model is BlackScholesConfig config ? config.VolAdjustment : 0;
+        double vol = market.Vol.Vol(strike, t) + adjustment;
+        return new(market.Spot, strike, t, vol, request.Market.DiscountCurve.ZeroRate(t), market.DividendCurve.ZeroRate(t));
     }
+
+    public static bool IsBreached(BarrierOption barrier, Trade trade, double spot) =>
+        trade.State?.BarrierBreached == true || barrier.IsBreachedAt(spot);
 }

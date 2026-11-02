@@ -389,12 +389,6 @@ public class EngineTests
     }
 
     [Fact]
-    public void AsianWithPastFixingsIsRefused()
-    {
-        Assert.Throws<NotSupportedException>(() => Price(Asian(OptionRight.Call, 100, 4, Today), Mc));
-    }
-
-    [Fact]
     public void ExpiryAndPastExpiryAreHandledByPdeAndMonteCarlo()
     {
         var atExpiry = new EuropeanOption { Underlying = Name, Right = OptionRight.Call, Strike = 85, Expiry = Today };

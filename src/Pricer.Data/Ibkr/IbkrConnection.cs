@@ -5,6 +5,8 @@ namespace Pricer.Data.Ibkr;
 
 public sealed record MarketTicks(double Bid, double Ask, double Last, double Close);
 
+public sealed record AccountPosition(Contract Contract, double Quantity);
+
 public sealed record OptionParameters(string Exchange, string TradingClass, string Multiplier, HashSet<string> Expirations, HashSet<double> Strikes);
 
 /// <summary>Task-based wrapper around the callback API. Read-only: it never sends orders.</summary>
@@ -29,6 +31,8 @@ public sealed class IbkrConnection : DefaultEWrapper, IDisposable
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _nextRequestId = 1000;
     private string? _lastConnectionError;
+    private readonly List<AccountPosition> _positions = [];
+    private TaskCompletionSource? _positionsDone;
 
     private IbkrConnection() => _client = new EClientSocket(this, _signal);
 
@@ -91,6 +95,22 @@ public sealed class IbkrConnection : DefaultEWrapper, IDisposable
         return new MarketTicks(pending.Bid, pending.Ask, pending.Last, pending.Close);
     }
 
+    public async Task<IReadOnlyList<AccountPosition>> PositionsAsync(TimeSpan timeout, CancellationToken token)
+    {
+        _positions.Clear();
+        _positionsDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _client.reqPositions();
+        try
+        {
+            await _positionsDone.Task.WaitAsync(timeout, token);
+        }
+        finally
+        {
+            _client.cancelPositions();
+        }
+        return [.. _positions];
+    }
+
     public void Dispose()
     {
         if (_client.IsConnected()) _client.eDisconnect();
@@ -123,6 +143,11 @@ public sealed class IbkrConnection : DefaultEWrapper, IDisposable
     }
 
     public override void nextValidId(int orderId) => _ready.TrySetResult();
+
+    public override void position(string account, Contract contract, decimal pos, double avgCost) =>
+        _positions.Add(new AccountPosition(contract, (double)pos));
+
+    public override void positionEnd() => _positionsDone?.TrySetResult();
 
     public override void error(Exception e) => _lastConnectionError = e.Message;
 

@@ -36,30 +36,32 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
 
     private sealed record Setup(
         PayoffProgram Program, double[] Times, double[] Forwards, Dictionary<DateOnly, int> Index, double[] Discounts,
-        BridgeStep[] Bridge, double Spot, double Vol, int Paths, MonteCarloEngineConfig Config, bool WantTangents, bool WantScores);
-
-    private readonly record struct BridgeStep(int Target, int Left, int Right, double LeftWeight, double RightWeight, double Noise);
+        BridgeStep[] Bridge, double Spot, double Vol, int Paths, MonteCarloEngineConfig Config, bool WantTangents, bool WantScores, double[] Slots);
 
     public PricingResult Price(PricingRequest request)
     {
-        var option = (OptionInstrument)request.Trade.Instrument;
+        var instrument = request.Trade.Instrument;
         var config = (MonteCarloEngineConfig)request.Engine;
-        var market = request.Market.Underlying(option.Underlying);
+        var market = request.Market.Underlying(instrument.Underlying);
         double quantity = request.Trade.Quantity;
         var valuation = request.ValuationDate;
-        double t = DayCount.Act365F.YearFraction(valuation, option.Expiry);
+        double t = DayCount.Act365F.YearFraction(valuation, ((IDatedProduct)instrument).Expiry);
 
-        if (t < 0) return Fixed(request, 0);
-        if (t == 0) return Fixed(request, quantity * PayoffCompiler.AtExpiry(option, market.Spot));
+        if (t < 0) return Fixed(request, 0, 0);
 
-        var x = EngineInputs.For(option, request, t);
+        var x = EngineInputs.For(instrument, request, t);
         if (x.Vol <= 0) throw new ArgumentException("Le Monte Carlo demande une vol strictement positive.");
-        var program = PayoffCompiler.Compile(option, valuation, market.Spot, x.Vol);
-        if (program.Events.Length == 0) return Fixed(request, 0);
+        var state = request.Trade.State;
+        var compiled = PayoffCompiler.Compile(instrument, valuation, market.Spot, x.Vol, state);
+        var replay = PayoffReplay.Run(compiled, instrument.Underlyings, valuation, state, _ => market.Spot);
+        double realised = quantity * replay.Realised;
+        double dueToday = quantity * replay.DueToday;
+        if (replay.Remaining.Length == 0) return Fixed(request, dueToday, realised);
+        var program = compiled with { Events = replay.Remaining };
 
         bool pathwise = config.Greeks == McGreekChoice.Auto && (program.IsContinuous || config.Smoothing > 0);
         bool wantGreeks = request.Measures.Any(m => m is Measure.Delta or Measure.Gamma or Measure.Vega);
-        var setup = Prepare(request, market, program, x.Vol, config, wantGreeks, pathwise);
+        var setup = Prepare(request, market, program, replay.Slots, x.Vol, config, wantGreeks, pathwise);
 
         var stats = new double[config.Batches][];
         Parallel.For(0, config.Batches, batch => stats[batch] = RunBatch(setup, batch));
@@ -94,15 +96,16 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
             Add(Measure.Gamma, Stat.ScoreGamma, GreekMethod.LikelihoodRatio, quantity);
             Add(Measure.Vega, Stat.ScoreVega, GreekMethod.LikelihoodRatio, quantity * VolPoint);
         }
-        return new PricingResult(quantity * Mean(Stat.Pv), Math.Abs(quantity) * Error(Stat.Pv), Name, greeks.ToImmutable());
+        return new PricingResult(
+            quantity * Mean(Stat.Pv) + dueToday, Math.Abs(quantity) * Error(Stat.Pv), Name, greeks.ToImmutable(), realised);
     }
 
-    private PricingResult Fixed(PricingRequest request, double pv) => new(pv, 0, Name, [.. request.Measures
+    private PricingResult Fixed(PricingRequest request, double pv, double realised) => new(pv, 0, Name, [.. request.Measures
         .Where(m => m is Measure.Delta or Measure.Gamma or Measure.Vega)
-        .Select(m => new GreekValue(m, 0, GreekMethod.ClosedForm, GreekConvention.Model))]);
+        .Select(m => new GreekValue(m, 0, GreekMethod.ClosedForm, GreekConvention.Model))], realised);
 
     private static Setup Prepare(
-        PricingRequest request, UnderlyingMarket market, PayoffProgram program, double vol,
+        PricingRequest request, UnderlyingMarket market, PayoffProgram program, double[] slots, double vol,
         MonteCarloEngineConfig config, bool wantGreeks, bool pathwise)
     {
         var dates = program.Events.Select(e => e.Date).Distinct().Order().ToArray();
@@ -111,41 +114,16 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
         double[] forwards = [.. times.Select((t, i) => market.Spot * market.DividendCurve.Discount(t) / discounts[i])];
         var index = dates.Select((d, i) => (d, i)).ToDictionary(x => x.d, x => x.i);
 
-        // Powers of two keep the Sobol set balanced.
-        int paths = 1 << BitOperations.Log2((uint)Math.Max(config.Paths / config.Batches * 2 - 1, 1));
         return new Setup(
-            program, times, forwards, index, discounts, BuildBridge(times), market.Spot, vol, paths, config,
-            wantGreeks && pathwise, wantGreeks && !pathwise);
-    }
-
-    /// <summary>Terminal point first, then midpoints breadth-first.</summary>
-    private static BridgeStep[] BuildBridge(double[] times)
-    {
-        int m = times.Length;
-        var steps = new List<BridgeStep> { new(m - 1, -1, -1, 0, 0, Math.Sqrt(times[m - 1])) };
-        var queue = new Queue<(int Left, int Right)>();
-        queue.Enqueue((-1, m - 1));
-        while (queue.TryDequeue(out var span))
-        {
-            if (span.Right - span.Left < 2) continue;
-            int middle = (span.Left + span.Right) / 2;
-            double tl = span.Left < 0 ? 0 : times[span.Left];
-            double tr = times[span.Right];
-            double tm = times[middle];
-            double width = tr - tl;
-            steps.Add(new BridgeStep(
-                middle, span.Left, span.Right, (tr - tm) / width, (tm - tl) / width, Math.Sqrt((tm - tl) * (tr - tm) / width)));
-            queue.Enqueue((span.Left, middle));
-            queue.Enqueue((middle, span.Right));
-        }
-        return [.. steps];
+            program, times, forwards, index, discounts, BrownianBridge.Build(times), market.Spot, vol,
+            McSizing.PathsPerBatch(config), config, wantGreeks && pathwise, wantGreeks && !pathwise, slots);
     }
 
     private static double[] RunBatch(Setup s, int batch)
     {
         int n = s.Paths;
         int m = s.Times.Length;
-        var random = new SplitMix(Mix((ulong)s.Config.Seed, (ulong)batch));
+        var random = new SplitMix(McSizing.BatchSeed(s.Config.Seed, batch));
         var uniforms = new double[n];
         var normals = new double[n];
         var brownian = new double[m][];
@@ -163,12 +141,13 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
                 for (int i = 0; i < n; i++) uniforms[i] = random.NextUniform();
             }
             for (int i = 0; i < n; i++) normals[i] = InverseNormal.Evaluate(uniforms[i]);
-            ApplyBridge(s.Bridge[dimension], brownian, normals);
+            BrownianBridge.Apply(s.Bridge[dimension], brownian, normals);
         }
 
         int tangents = s.WantTangents ? Tangents : 0;
-        var evaluator = new PayoffEvaluator(s.Program.Slots, n, tangents, s.Config.Smoothing);
-        var (spot, spotTangents) = evaluator.SpotBuffers();
+        var evaluator = new PayoffEvaluator(s.Program.Slots, 1, n, tangents, s.Config.Smoothing);
+        evaluator.Seed(s.Slots);
+        var (spot, spotTangents) = evaluator.SpotBuffers(0);
 
         int current = -1;
         foreach (var payoffEvent in s.Program.Events.OrderBy(e => e.Date))
@@ -189,46 +168,6 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
         if (s.WantTangents) Pathwise(s, evaluator, brownian[0], stats);
         if (s.WantScores) Scores(s, pv, brownian, stats);
         return stats;
-    }
-
-    private static ulong Mix(ulong seed, ulong batch) => new SplitMix(seed * 0xD1342543DE82EF95 + batch).Next();
-
-    private static void ApplyBridge(in BridgeStep step, double[][] brownian, double[] normals)
-    {
-        double[] target = brownian[step.Target];
-        var noise = new Vector<double>(step.Noise);
-        int width = Vector<double>.Count;
-        int i = 0;
-        if (step.Left < 0 && step.Right < 0)
-        {
-            for (; i <= target.Length - width; i += width) (noise * new Vector<double>(normals, i)).CopyTo(target, i);
-            for (; i < target.Length; i++) target[i] = step.Noise * normals[i];
-            return;
-        }
-
-        double[] right = brownian[step.Right];
-        var rightWeight = new Vector<double>(step.RightWeight);
-        if (step.Left < 0)
-        {
-            for (; i <= target.Length - width; i += width)
-            {
-                (rightWeight * new Vector<double>(right, i) + noise * new Vector<double>(normals, i)).CopyTo(target, i);
-            }
-            for (; i < target.Length; i++) target[i] = step.RightWeight * right[i] + step.Noise * normals[i];
-            return;
-        }
-
-        double[] left = brownian[step.Left];
-        var leftWeight = new Vector<double>(step.LeftWeight);
-        for (; i <= target.Length - width; i += width)
-        {
-            (leftWeight * new Vector<double>(left, i) + rightWeight * new Vector<double>(right, i)
-                + noise * new Vector<double>(normals, i)).CopyTo(target, i);
-        }
-        for (; i < target.Length; i++)
-        {
-            target[i] = step.LeftWeight * left[i] + step.RightWeight * right[i] + step.Noise * normals[i];
-        }
     }
 
     /// <summary>S(t) = F(t) exp(vol W(t) - vol^2 t / 2).</summary>

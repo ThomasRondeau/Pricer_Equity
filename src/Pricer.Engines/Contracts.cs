@@ -19,6 +19,7 @@ public enum Measure
 public enum GreekMethod
 {
     ClosedForm,
+    SemiAnalytic,
     PdeGrid,
     Pathwise,
 
@@ -85,6 +86,10 @@ public sealed record MonteCarloEngineConfig : EngineConfig
     /// <summary>Half-width of the ramp replacing a step in pathwise derivatives, relative to its scale. The PV stays unsmoothed.</summary>
     [Parameter("Lissage des discontinuités", Group = "Moteur", Unit = "rel", Min = 0, Max = 0.1)]
     public double Smoothing { get; init; }
+
+    /// <summary>For the stepped models; Black-Scholes jumps exactly from one event date to the next.</summary>
+    [Parameter("Pas par an", Group = "Moteur", Min = 4, Max = 365)]
+    public int StepsPerYear { get; init; } = 52;
 }
 
 public sealed record PricingRequest(
@@ -98,11 +103,15 @@ public sealed record PricingRequest(
 /// <summary>Position-level sensitivity. Units: delta per spot unit, gamma per spot unit squared,
 /// vega per vol point, theta per calendar day, rho per rate point.</summary>
 public sealed record GreekValue(
-    Measure Measure, double Value, GreekMethod Method, GreekConvention Convention, double? StandardError = null);
+    Measure Measure, double Value, GreekMethod Method, GreekConvention Convention, double? StandardError = null,
+    string? Underlying = null);
 
-public sealed record PricingResult(double Pv, double? PvStandardError, string Engine, ImmutableArray<GreekValue> Greeks)
+/// <param name="Realised">Cash already paid by the trade before the valuation date; not part of the PV.</param>
+public sealed record PricingResult(
+    double Pv, double? PvStandardError, string Engine, ImmutableArray<GreekValue> Greeks, double Realised = 0)
 {
-    public GreekValue? Greek(Measure measure) => Greeks.FirstOrDefault(g => g.Measure == measure);
+    public GreekValue? Greek(Measure measure, string? underlying = null) =>
+        Greeks.FirstOrDefault(g => g.Measure == measure && (underlying is null || g.Underlying == underlying));
 }
 
 public interface IPricingEngine

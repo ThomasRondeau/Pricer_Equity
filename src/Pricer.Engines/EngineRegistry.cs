@@ -10,8 +10,9 @@ public sealed class EngineRegistry
     public static EngineRegistry Default()
     {
         var analytic = new BlackScholesAnalyticEngine();
-        var pde = new BlackScholesPdeEngine();
+        var pde = new FiniteDifferenceEngine();
         var monteCarlo = new BlackScholesMonteCarloEngine();
+        var simulation = new PathSimulationEngine();
         return new EngineRegistry()
             .Register<Stock, BlackScholesConfig, AnalyticEngineConfig>(analytic)
             .Register<EquityForward, BlackScholesConfig, AnalyticEngineConfig>(analytic)
@@ -25,7 +26,30 @@ public sealed class EngineRegistry
             .Register<EuropeanOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
             .Register<DigitalOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
             .Register<BarrierOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
-            .Register<AsianOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo);
+            .Register<AsianOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
+            .Register<ReverseConvertible, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
+            .Register<Autocall, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
+            .Register<Phoenix, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
+            .Register<EuropeanOption, LocalVolConfig, PdeEngineConfig>(pde)
+            .Register<AmericanOption, LocalVolConfig, PdeEngineConfig>(pde)
+            .Register<DigitalOption, LocalVolConfig, PdeEngineConfig>(pde)
+            .Register<BarrierOption, LocalVolConfig, PdeEngineConfig>(pde)
+            .Register<EuropeanOption, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<DigitalOption, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<BarrierOption, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<AsianOption, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<ReverseConvertible, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<Autocall, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<Phoenix, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<WorstOfPhoenix, LocalVolConfig, MonteCarloEngineConfig>(simulation)
+            .Register<EuropeanOption, HestonConfig, AnalyticEngineConfig>(new HestonAnalyticEngine())
+            .Register<EuropeanOption, HestonConfig, MonteCarloEngineConfig>(simulation)
+            .Register<DigitalOption, HestonConfig, MonteCarloEngineConfig>(simulation)
+            .Register<BarrierOption, HestonConfig, MonteCarloEngineConfig>(simulation)
+            .Register<AsianOption, HestonConfig, MonteCarloEngineConfig>(simulation)
+            .Register<ReverseConvertible, HestonConfig, MonteCarloEngineConfig>(simulation)
+            .Register<Autocall, HestonConfig, MonteCarloEngineConfig>(simulation)
+            .Register<Phoenix, HestonConfig, MonteCarloEngineConfig>(simulation);
     }
 
     public EngineRegistry Register<TInstrument, TModel, TConfig>(IPricingEngine engine)

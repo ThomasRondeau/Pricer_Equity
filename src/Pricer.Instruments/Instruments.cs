@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.Json.Serialization;
 using Pricer.Core;
 
@@ -25,13 +26,30 @@ public enum BarrierKind
 [JsonDerivedType(typeof(DigitalOption), "digital")]
 [JsonDerivedType(typeof(BarrierOption), "barrier")]
 [JsonDerivedType(typeof(AsianOption), "asian")]
+[JsonDerivedType(typeof(ReverseConvertible), "reverse-convertible")]
+[JsonDerivedType(typeof(Autocall), "autocall")]
+[JsonDerivedType(typeof(Phoenix), "phoenix")]
+[JsonDerivedType(typeof(WorstOfPhoenix), "worst-of-phoenix")]
 public abstract record Instrument
 {
     public required string Underlying { get; init; }
+
+    /// <summary>All underlyings, in the order of the asset indices of the payoff.</summary>
+    [JsonIgnore]
+    public virtual ImmutableArray<string> Underlyings => [Underlying];
+}
+
+/// <summary>A product priced from paths or grids rather than from spot alone.</summary>
+public interface IDatedProduct
+{
+    DateOnly Expiry { get; }
+
+    /// <summary>Strike at which a single-vol model reads the surface.</summary>
+    double ReferenceStrike { get; }
 }
 
 /// <summary>An option with a single strike and expiry.</summary>
-public abstract record OptionInstrument : Instrument
+public abstract record OptionInstrument : Instrument, IDatedProduct
 {
     [Parameter("Type", Group = "Produit")]
     public required OptionRight Right { get; init; }
@@ -43,6 +61,9 @@ public abstract record OptionInstrument : Instrument
     public required DateOnly Expiry { get; init; }
 
     public double Sign => Right == OptionRight.Call ? 1 : -1;
+
+    [JsonIgnore]
+    public double ReferenceStrike => Strike;
 }
 
 public sealed record Stock : Instrument;
@@ -91,4 +112,88 @@ public sealed record AsianOption : OptionInstrument
     public int Fixings { get; init; } = 12;
 }
 
-public sealed record Trade(string Id, Instrument Instrument, double Quantity);
+/// <summary>A note on a performance relative to initial fixings. Barriers and coupons are fractions of
+/// the initial fixing and of the notional; below the protection barrier at expiry, the notional follows the performance.</summary>
+public abstract record StructuredNote : Instrument, IDatedProduct
+{
+    [Parameter("Nominal", Group = "Produit", Min = 1, Max = 100000)]
+    public double Notional { get; init; } = 100;
+
+    [Parameter("Fixing initial", Group = "Produit", Min = 0.2, Max = 3, Relative = true)]
+    public required double InitialFixing { get; init; }
+
+    [Parameter("Date de départ", Group = "Produit")]
+    public required DateOnly Start { get; init; }
+
+    [Parameter("Échéance", Group = "Produit")]
+    public required DateOnly Expiry { get; init; }
+
+    [Parameter("Période", Group = "Produit", Unit = "mois", Min = 1, Max = 12)]
+    public int PeriodMonths { get; init; } = 3;
+
+    [Parameter("Coupon par période", Group = "Produit", Unit = "rel", Min = 0, Max = 0.2)]
+    public double Coupon { get; init; } = 0.02;
+
+    [Parameter("Barrière de protection", Group = "Produit", Unit = "rel", Min = 0.2, Max = 1.2)]
+    public double Protection { get; init; } = 0.6;
+
+    [JsonIgnore]
+    public double ReferenceStrike => InitialFixing * Protection;
+
+    /// <summary>Dates from Start by whole periods; the last one is always Expiry.</summary>
+    public ImmutableArray<DateOnly> Observations()
+    {
+        if (PeriodMonths < 1) throw new ArgumentException("La période doit durer au moins un mois.");
+        var dates = ImmutableArray.CreateBuilder<DateOnly>();
+        for (int i = 1; Start.AddMonths(i * PeriodMonths) < Expiry; i++) dates.Add(Start.AddMonths(i * PeriodMonths));
+        dates.Add(Expiry);
+        return dates.ToImmutable();
+    }
+}
+
+/// <summary>Pays its coupon unconditionally. Called "barrier reverse convertible" with protection under 1.</summary>
+public sealed record ReverseConvertible : StructuredNote;
+
+/// <summary>Redeemed early at the first observation above the call barrier, with the coupons of all elapsed periods.</summary>
+public sealed record Autocall : StructuredNote
+{
+    [Parameter("Barrière de rappel", Group = "Produit", Unit = "rel", Min = 0.5, Max = 1.5)]
+    public double CallBarrier { get; init; } = 1;
+}
+
+/// <summary>Pays a conditional coupon, with those missed before when memory is on, and can be called.</summary>
+public record Phoenix : StructuredNote
+{
+    [Parameter("Barrière de rappel", Group = "Produit", Unit = "rel", Min = 0.5, Max = 1.5)]
+    public double CallBarrier { get; init; } = 1;
+
+    [Parameter("Barrière de coupon", Group = "Produit", Unit = "rel", Min = 0.2, Max = 1.2)]
+    public double CouponBarrier { get; init; } = 0.7;
+
+    [Parameter("Effet mémoire", Group = "Produit")]
+    public bool Memory { get; init; } = true;
+}
+
+public sealed record BasketLeg(string Underlying, double InitialFixing);
+
+/// <summary>A Phoenix on the worst performance of a basket. Underlying and InitialFixing repeat the first leg.</summary>
+public sealed record WorstOfPhoenix : Phoenix
+{
+    public required ImmutableArray<BasketLeg> Basket { get; init; }
+
+    [JsonIgnore]
+    public override ImmutableArray<string> Underlyings => [.. Basket.Select(l => l.Underlying)];
+}
+
+/// <summary>What has happened to a trade so far. Everything else is rebuilt by replaying its payoff on the fixings.</summary>
+public sealed record TradeState
+{
+    public ImmutableArray<FixingRecord> Fixings { get; init; } = [];
+
+    /// <summary>A continuous barrier cannot be replayed from fixings, so its crossing is recorded.</summary>
+    public bool BarrierBreached { get; init; }
+}
+
+public sealed record FixingRecord(string Underlying, DateOnly Date, double Level);
+
+public sealed record Trade(string Id, Instrument Instrument, double Quantity, TradeState? State = null);

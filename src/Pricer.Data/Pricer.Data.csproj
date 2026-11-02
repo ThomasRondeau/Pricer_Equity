@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Pricer.Market\Pricer.Market.csproj" />
     <ProjectReference Include="..\Pricer.Models\Pricer.Models.csproj" />
+    <ProjectReference Include="..\Pricer.Book\Pricer.Book.csproj" />
   </ItemGroup>
 
   <ItemGroup>
