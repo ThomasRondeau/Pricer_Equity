@@ -22,6 +22,12 @@ public sealed record CaptureSettings
         new("SPX", "IND", "CBOE", "USD", ExerciseStyle.European),
     ];
 
+    public ImmutableArray<ChainRequest> YahooWatchlist { get; init; } =
+    [
+        new("^SPX", "IND", "CBOE", "USD", ExerciseStyle.European),
+        new("SPY", "STK", "SMART", "USD", ExerciseStyle.American),
+    ];
+
     /// <summary>IBKR provides no discount curve: these are placeholder rates until set by hand.</summary>
     public YieldCurve DiscountCurve { get; init; } = SyntheticMarketDataProvider.DiscountCurve;
 
@@ -87,7 +93,8 @@ public sealed class SnapshotCapture(IOptionChainSource source, SnapshotStore sto
             throw new InvalidOperationException("Aucune chaîne capturée. " + string.Join(" ", failures));
         }
         // Raw chains are saved even when calibration failed: they cannot be fetched again.
-        long id = store.Save(new MarketSnapshot(asOf, settings.DiscountCurve, underlyings), chains, reports, source.Name);
+        var marketDate = chains.Max(c => c.AsOf);
+        long id = store.Save(new MarketSnapshot(marketDate, settings.DiscountCurve, underlyings), chains, reports, source.Name);
         return new CaptureOutcome(id, [.. reports], [.. failures]);
     }
 }

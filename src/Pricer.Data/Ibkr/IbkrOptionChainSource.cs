@@ -11,8 +11,6 @@ public sealed class IbkrOptionChainSource(CaptureSettings settings) : IOptionCha
     private const string DateFormat = "yyyyMMdd";
     private const int MaxConcurrent = 80;
     private const int StrikesPerExpiry = 25;
-    private const int MinDaysToExpiry = 7;
-    private static readonly int[] TargetDays = [14, 30, 60, 90, 180, 270, 365, 540, 730];
     private static readonly TimeSpan PacingDelay = TimeSpan.FromMilliseconds(25);
     private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan QuoteTimeout = TimeSpan.FromSeconds(15);
@@ -90,22 +88,16 @@ public sealed class IbkrOptionChainSource(CaptureSettings settings) : IOptionCha
         // The same expiry can exist in several trading classes (SPX, SPXW): prefer the standard one.
         var expiries = smart.OrderBy(p => p.TradingClass == request.Symbol ? 1 : 0)
             .SelectMany(p => p.Expirations.Select(e => (Date: DateOnly.ParseExact(e, DateFormat, CultureInfo.InvariantCulture), Text: e, Class: p)))
-            .Where(e => e.Date.DayNumber - asOf.DayNumber >= MinDaysToExpiry)
             .GroupBy(e => e.Date)
             .ToDictionary(g => g.Key, g => g.Last());
 
-        var chosen = TargetDays
-            .Select(days => expiries.Keys.OrderBy(d => Math.Abs(d.DayNumber - asOf.DayNumber - days)).First())
-            .Distinct();
-
         var contracts = new List<Contract>();
-        foreach (var date in chosen)
+        foreach (var date in ChainFilter.Expiries(expiries.Keys, asOf))
         {
             var expiry = expiries[date];
             double t = (date.DayNumber - asOf.DayNumber) / 365.0;
-            double width = 0.1 + 0.25 * Math.Sqrt(t);
             var strikes = expiry.Class.Strikes
-                .Where(k => Math.Abs(k / spot - 1) <= width)
+                .Where(k => ChainFilter.IsNearSpot(k, spot, t))
                 .Order()
                 .ToArray();
             double step = Math.Max(1.0, strikes.Length / (double)StrikesPerExpiry);

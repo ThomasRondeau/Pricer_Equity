@@ -12,7 +12,7 @@ public sealed class RiskCalculator(EngineRegistry registry)
 
     public PricingResult Compute(PricingRequest request, RiskConfig config)
     {
-        var engine = registry.Resolve(request.Trade.Instrument, request.Model);
+        var engine = registry.Resolve(request.Trade.Instrument, request.Model, request.Engine);
         var result = engine.Price(request);
 
         var own = config.Preference == GreekPreference.ForceBump ? ImmutableArray<GreekValue>.Empty : result.Greeks;

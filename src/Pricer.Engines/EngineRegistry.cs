@@ -5,28 +5,45 @@ namespace Pricer.Engines;
 
 public sealed class EngineRegistry
 {
-    private readonly Dictionary<(Type Instrument, Type Model), IPricingEngine> _engines = [];
+    private readonly Dictionary<(Type Instrument, Type Model, Type Config), IPricingEngine> _engines = [];
 
     public static EngineRegistry Default()
     {
         var analytic = new BlackScholesAnalyticEngine();
+        var pde = new BlackScholesPdeEngine();
+        var monteCarlo = new BlackScholesMonteCarloEngine();
         return new EngineRegistry()
-            .Register<Stock, BlackScholesConfig>(analytic)
-            .Register<EquityForward, BlackScholesConfig>(analytic)
-            .Register<EuropeanOption, BlackScholesConfig>(analytic);
+            .Register<Stock, BlackScholesConfig, AnalyticEngineConfig>(analytic)
+            .Register<EquityForward, BlackScholesConfig, AnalyticEngineConfig>(analytic)
+            .Register<EuropeanOption, BlackScholesConfig, AnalyticEngineConfig>(analytic)
+            .Register<DigitalOption, BlackScholesConfig, AnalyticEngineConfig>(analytic)
+            .Register<BarrierOption, BlackScholesConfig, AnalyticEngineConfig>(analytic)
+            .Register<EuropeanOption, BlackScholesConfig, PdeEngineConfig>(pde)
+            .Register<AmericanOption, BlackScholesConfig, PdeEngineConfig>(pde)
+            .Register<DigitalOption, BlackScholesConfig, PdeEngineConfig>(pde)
+            .Register<BarrierOption, BlackScholesConfig, PdeEngineConfig>(pde)
+            .Register<EuropeanOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
+            .Register<DigitalOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
+            .Register<BarrierOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo)
+            .Register<AsianOption, BlackScholesConfig, MonteCarloEngineConfig>(monteCarlo);
     }
 
-    public EngineRegistry Register<TInstrument, TModel>(IPricingEngine engine)
+    public EngineRegistry Register<TInstrument, TModel, TConfig>(IPricingEngine engine)
         where TInstrument : Instrument
         where TModel : ModelConfig
+        where TConfig : EngineConfig
     {
-        _engines[(typeof(TInstrument), typeof(TModel))] = engine;
+        _engines[(typeof(TInstrument), typeof(TModel), typeof(TConfig))] = engine;
         return this;
     }
 
-    public IPricingEngine Resolve(Instrument instrument, ModelConfig model) =>
-        _engines.TryGetValue((instrument.GetType(), model.GetType()), out var engine)
+    public IPricingEngine Resolve(Instrument instrument, ModelConfig model, EngineConfig config) =>
+        _engines.TryGetValue((instrument.GetType(), model.GetType(), config.GetType()), out var engine)
             ? engine
             : throw new NotSupportedException(
-                $"No engine for {instrument.GetType().Name} under {model.GetType().Name}.");
+                $"Pas de moteur pour {instrument.GetType().Name} sous {model.GetType().Name} avec {config.GetType().Name}.");
+
+    /// <summary>Engine configurations available for a product, for the screen's engine choice.</summary>
+    public IReadOnlyList<Type> ConfigsFor(Type instrument, Type model) =>
+        [.. _engines.Keys.Where(k => k.Instrument == instrument && k.Model == model).Select(k => k.Config)];
 }

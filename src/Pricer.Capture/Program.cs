@@ -1,11 +1,9 @@
 ﻿using Pricer.Data;
 using Pricer.Data.Ibkr;
+using Pricer.Data.Yahoo;
 
 // Daily capture, meant for Windows Task Scheduler. Exit code 1 means nothing was stored.
 var settings = CaptureSettings.Load();
-bool synthetic = args.Contains("--synthetic");
-IOptionChainSource source = synthetic ? new SyntheticOptionChainSource() : new IbkrOptionChainSource(settings);
-if (synthetic) settings = settings with { Watchlist = [new ChainRequest("SYNTH")] };
 
 using var cancel = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -16,6 +14,19 @@ Console.CancelKeyPress += (_, e) =>
 
 try
 {
+    using var yahoo = new YahooOptionChainSource();
+    IOptionChainSource source = new IbkrOptionChainSource(settings);
+    if (args.Contains("--synthetic"))
+    {
+        source = new SyntheticOptionChainSource();
+        settings = settings with { Watchlist = [new ChainRequest("SYNTH")] };
+    }
+    else if (args.Contains("--yahoo"))
+    {
+        source = yahoo;
+        settings = await yahoo.PrepareAsync(settings, cancel.Token);
+    }
+
     var store = new SnapshotStore(CaptureSettings.DatabasePath);
     var capture = new SnapshotCapture(source, store);
     var progress = new Progress<string>(Console.WriteLine);
