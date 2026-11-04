@@ -1,0 +1,446 @@
+using System.Collections.Immutable;
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Pricer.Book;
+using Pricer.Core;
+using Pricer.Data;
+using Pricer.Engines;
+using Pricer.Instruments;
+using Pricer.Market;
+using Pricer.Models;
+using Pricer.Risk;
+
+namespace Pricer.App.ViewModels;
+
+public enum ProductKind
+{
+    OptionEuropeenne,
+    OptionAmericaine,
+    Digitale,
+    Barriere,
+    Asiatique,
+    ReverseConvertible,
+    Autocall,
+    Phoenix,
+    WorstOf,
+    Forward,
+    Action,
+}
+
+public enum ModelKind
+{
+    BlackScholes,
+    VolLocale,
+    Heston,
+}
+
+public enum EngineKind
+{
+    Analytique,
+    Pde,
+    MonteCarlo,
+}
+
+/// <summary>Manual overrides, layered over the selected snapshot.</summary>
+public sealed record MarketInputs
+{
+    [Parameter("Spot", Group = "Marché", Min = 0.2, Max = 3, Relative = true)]
+    public double Spot { get; init; }
+
+    [Parameter("Décalage de vol", Group = "Marché", Unit = "abs", Min = -0.15, Max = 0.3)]
+    public double VolShift { get; init; }
+
+    [Parameter("Décalage du dividende", Group = "Marché", Unit = "abs", Min = -0.05, Max = 0.05)]
+    public double DividendShift { get; init; }
+
+    [Parameter("Décalage de la courbe", Group = "Marché", Unit = "abs", Min = -0.03, Max = 0.03)]
+    public double RateShift { get; init; }
+
+    public MarketSnapshot ApplyTo(MarketSnapshot snapshot, string underlying)
+    {
+        var market = snapshot.Underlying(underlying);
+        return snapshot.WithUnderlying(underlying, new UnderlyingMarket(
+            Spot, market.DividendCurve.Shifted(DividendShift), market.Vol.Shifted(VolShift))) with
+        {
+            DiscountCurve = snapshot.DiscountCurve.Shifted(RateShift),
+        };
+    }
+}
+
+public sealed record PositionInputs
+{
+    [Parameter("Quantité", Group = "Position", Min = -1000, Max = 1000)]
+    public double Quantity { get; init; } = 1;
+}
+
+/// <summary>A simplified past for a trade in life: all past fixings at one level.</summary>
+public sealed record LifeInputs
+{
+    [Parameter("Niveau des fixings passés", Group = "Vie du trade", Unit = "× initial", Min = 0.2, Max = 2)]
+    public double PastLevel { get; init; } = 1;
+
+    [Parameter("Barrière déjà franchie", Group = "Vie du trade")]
+    public bool BarrierBreached { get; init; }
+
+    public TradeState State(Instrument instrument, DateOnly asOf, Func<string, double> spot)
+    {
+        if (instrument is not (StructuredNote or AsianOption)) return new TradeState { BarrierBreached = BarrierBreached };
+
+        var dates = PayoffCompiler.Compile(instrument, asOf, 0, 0).Events.Select(e => e.Date).Where(d => d < asOf).Distinct();
+        return new TradeState
+        {
+            BarrierBreached = BarrierBreached,
+            Fixings = [.. dates.SelectMany(date => instrument.Underlyings.Select(
+                name => new FixingRecord(name, date, PastLevel * Initial(instrument, name, spot))))],
+        };
+    }
+
+    private static double Initial(Instrument instrument, string name, Func<string, double> spot) => instrument switch
+    {
+        WorstOfPhoenix worst => worst.Basket.First(l => l.Underlying == name).InitialFixing,
+        StructuredNote note => note.InitialFixing,
+        _ => spot(name),
+    };
+}
+
+public sealed record GreekRow(
+    string Measure, double Value, double? Error, string Method, string Convention, double BumpValue, double Gap);
+
+public sealed record EngineRow(string Engine, double Pv, double? Error, double Milliseconds);
+
+public sealed record ProfileData(double[] Spots, double[] Values);
+
+public sealed partial class PricerViewModel : ObservableObject
+{
+    private const int ProductForm = 0;
+    private const int PositionForm = 1;
+    private const int MarketForm = 2;
+    private const int ModelForm = 3;
+    private const int EngineForm = 4;
+    private const int RiskForm = 5;
+    private const int LifeForm = 6;
+    private const int ProfilePoints = 81;
+    private const int PreviewDivisor = 16;
+    private const int MinPreviewPaths = 1024;
+    private const int PreviewBatches = 8;
+
+    /// <summary>A small bump on a payoff with jumps measures noise, not a sensitivity.</summary>
+    private const double NoteSpotBump = 0.01;
+    private static readonly TimeSpan Debounce = TimeSpan.FromMilliseconds(60);
+    private static readonly ImmutableArray<Measure> AllMeasures = [.. Enum.GetValues<Measure>()];
+
+    private static readonly Dictionary<Type, EngineKind> EngineKindOf = new()
+    {
+        [typeof(AnalyticEngineConfig)] = EngineKind.Analytique,
+        [typeof(PdeEngineConfig)] = EngineKind.Pde,
+        [typeof(MonteCarloEngineConfig)] = EngineKind.MonteCarlo,
+    };
+
+    private readonly EngineRegistry _registry = EngineRegistry.Default();
+    private readonly RiskCalculator _risk;
+    private HestonConfig _heston = new();
+    private MarketSnapshot _snapshot;
+    private string _underlying = SyntheticMarketDataProvider.DefaultUnderlying;
+    private CancellationTokenSource? _pending;
+
+    [ObservableProperty] private ProductKind _productKind = ProductKind.OptionEuropeenne;
+    [ObservableProperty] private IReadOnlyList<ModelKind> _availableModels = [ModelKind.BlackScholes, ModelKind.VolLocale, ModelKind.Heston];
+    [ObservableProperty] private ModelKind _selectedModel = ModelKind.BlackScholes;
+    [ObservableProperty] private IReadOnlyList<EngineKind> _availableEngines = [EngineKind.Analytique, EngineKind.Pde, EngineKind.MonteCarlo];
+    [ObservableProperty] private EngineKind _selectedEngine = EngineKind.Analytique;
+    [ObservableProperty] private string _pvText = "";
+    [ObservableProperty] private string _marketLabel = "";
+    [ObservableProperty] private string _status = "";
+    [ObservableProperty] private bool _hasError;
+
+    public PricerViewModel()
+    {
+        _risk = new RiskCalculator(_registry);
+        _snapshot = new SyntheticMarketDataProvider().GetSnapshot(DateOnly.FromDateTime(DateTime.Today));
+        Forms = [];
+        for (int i = 0; i <= LifeForm; i++) Forms.Add(NewForm(i));
+        foreach (var form in Forms) form.Changed += Schedule;
+        UpdateMarketLabel();
+        Schedule();
+    }
+
+    public event Action<ProfileData>? ProfileChanged;
+    public event Action<Position>? PositionRequested;
+
+    public Array ProductKinds { get; } = Enum.GetValues<ProductKind>();
+    public ObservableCollection<ParameterForm> Forms { get; }
+    public ObservableCollection<GreekRow> Greeks { get; } = [];
+    public ObservableCollection<EngineRow> Engines { get; } = [];
+
+    public void UseMarket(MarketSnapshot snapshot, string underlying)
+    {
+        _snapshot = snapshot;
+        _underlying = underlying;
+        Replace(ProductForm);
+        Replace(MarketForm);
+        UpdateMarketLabel();
+        Schedule();
+    }
+
+    [RelayCommand]
+    private void AddToBook()
+    {
+        var instrument = (Instrument)Forms[ProductForm].Record;
+        var state = ((LifeInputs)Forms[LifeForm].Record).State(instrument, _snapshot.AsOf, name => _snapshot.Underlying(name).Spot);
+        var model = SelectedModel switch
+        {
+            ModelKind.VolLocale => ModelChoice.LocalVol,
+            ModelKind.Heston => ModelChoice.Heston,
+            _ => ModelChoice.BlackScholes,
+        };
+        PositionRequested?.Invoke(new Position(
+            $"L-{Guid.NewGuid():N}"[..10], instrument, ((PositionInputs)Forms[PositionForm].Record).Quantity,
+            Tag: "Pricer", State: state, Model: model));
+        Status = "Ajouté au book.";
+    }
+
+    /// <summary>The calibrated parameters take over from the defaults for the Heston model.</summary>
+    public void UseHeston(HestonConfig config)
+    {
+        _heston = config;
+        if (SelectedModel != ModelKind.Heston) return;
+        Replace(ModelForm);
+        Schedule();
+    }
+
+    private Type InstrumentType => Forms[ProductForm].Record.GetType();
+
+    private IEnumerable<EngineKind> EnginesFor(ModelKind model) =>
+        _registry.ConfigsFor(InstrumentType, ModelType(model)).Select(c => EngineKindOf[c]).Order();
+
+    partial void OnProductKindChanged(ProductKind value)
+    {
+        Replace(ProductForm);
+        Replace(RiskForm);
+        AvailableModels = [.. Enum.GetValues<ModelKind>().Where(m => EnginesFor(m).Any())];
+        if (AvailableModels.Contains(SelectedModel)) RefreshEngines();
+        else SelectedModel = AvailableModels[0];
+    }
+
+    partial void OnSelectedModelChanged(ModelKind value)
+    {
+        Replace(ModelForm);
+        RefreshEngines();
+    }
+
+    private void RefreshEngines()
+    {
+        AvailableEngines = [.. EnginesFor(SelectedModel)];
+        if (AvailableEngines.Contains(SelectedEngine)) Schedule();
+        else SelectedEngine = AvailableEngines[0];
+    }
+
+    partial void OnSelectedEngineChanged(EngineKind value)
+    {
+        Replace(EngineForm);
+        Schedule();
+    }
+
+    private void UpdateMarketLabel() => MarketLabel = $"{_underlying} au {_snapshot.AsOf:dd/MM/yyyy}";
+
+    private void Replace(int index)
+    {
+        Forms[index].Changed -= Schedule;
+        Forms[index] = NewForm(index);
+        Forms[index].Changed += Schedule;
+    }
+
+    private ParameterForm NewForm(int index) => index switch
+    {
+        ProductForm => new("Produit", NewInstrument()),
+        PositionForm => new("Position", new PositionInputs()),
+        MarketForm => new("Marché (surcharges)", new MarketInputs { Spot = _snapshot.Underlying(_underlying).Spot }),
+        ModelForm => new($"Modèle : {SelectedModel}", NewModel(SelectedModel)),
+        EngineForm => new($"Moteur : {SelectedEngine}", NewEngine(SelectedEngine)),
+        RiskForm => new("Risque", ProductKind >= ProductKind.ReverseConvertible && ProductKind <= ProductKind.WorstOf
+            ? new RiskConfig { SpotBump = NoteSpotBump }
+            : new RiskConfig()),
+        LifeForm => new("Vie du trade", new LifeInputs()),
+        _ => throw new ArgumentOutOfRangeException(nameof(index)),
+    };
+
+    private static Type ModelType(ModelKind kind) => kind switch
+    {
+        ModelKind.VolLocale => typeof(LocalVolConfig),
+        ModelKind.Heston => typeof(HestonConfig),
+        _ => typeof(BlackScholesConfig),
+    };
+
+    private ModelConfig NewModel(ModelKind kind) => kind switch
+    {
+        ModelKind.VolLocale => new LocalVolConfig(),
+        ModelKind.Heston => _heston,
+        _ => new BlackScholesConfig(),
+    };
+
+    private static EngineConfig NewEngine(EngineKind kind) => kind switch
+    {
+        EngineKind.Pde => new PdeEngineConfig(),
+        EngineKind.MonteCarlo => new MonteCarloEngineConfig(),
+        _ => new AnalyticEngineConfig(),
+    };
+
+    /// <summary>The profile reprices many times, so Monte Carlo runs lighter there.</summary>
+    private static EngineConfig Preview(EngineConfig config) => config is MonteCarloEngineConfig mc
+        ? mc with { Paths = Math.Max(mc.Paths / PreviewDivisor, MinPreviewPaths), Batches = PreviewBatches }
+        : config;
+
+    private Instrument NewInstrument()
+    {
+        double strike = Math.Round(_snapshot.Underlying(_underlying).Spot);
+        var expiry = _snapshot.AsOf.AddYears(1);
+        double spot = _snapshot.Underlying(_underlying).Spot;
+        var start = _snapshot.AsOf;
+        return ProductKind switch
+        {
+            ProductKind.OptionEuropeenne => new EuropeanOption
+            {
+                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
+            },
+            ProductKind.OptionAmericaine => new AmericanOption
+            {
+                Underlying = _underlying, Right = OptionRight.Put, Strike = strike, Expiry = expiry,
+            },
+            ProductKind.Digitale => new DigitalOption
+            {
+                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
+            },
+            ProductKind.Barriere => new BarrierOption
+            {
+                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
+                Barrier = Math.Round(0.8 * strike), Kind = BarrierKind.DownOut,
+            },
+            ProductKind.Asiatique => new AsianOption
+            {
+                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
+                AveragingStart = _snapshot.AsOf.AddMonths(1),
+            },
+            ProductKind.ReverseConvertible => new ReverseConvertible
+            {
+                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = expiry, Protection = 0.8,
+            },
+            ProductKind.Autocall => new Autocall
+            {
+                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = start.AddYears(3),
+            },
+            ProductKind.Phoenix => new Phoenix
+            {
+                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = start.AddYears(3),
+            },
+            ProductKind.WorstOf => new WorstOfPhoenix
+            {
+                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = start.AddYears(3),
+                Basket = [.. _snapshot.Underlyings.Keys.OrderBy(n => n != _underlying)
+                    .Select(n => new BasketLeg(n, _snapshot.Underlying(n).Spot))],
+            },
+            ProductKind.Forward => new EquityForward { Underlying = _underlying, Strike = strike, Expiry = expiry },
+            ProductKind.Action => new Stock { Underlying = _underlying },
+            _ => throw new InvalidOperationException(),
+        };
+    }
+
+    private sealed record Output(
+        PricingResult Best, PricingResult Bumped, ProfileData Profile, ImmutableArray<EngineRow> Engines, string Hash, TimeSpan Elapsed);
+
+    private async void Schedule()
+    {
+        _pending?.Cancel();
+        var pending = _pending = new CancellationTokenSource();
+        var token = pending.Token;
+
+        var market = ((MarketInputs)Forms[MarketForm].Record).ApplyTo(_snapshot, _underlying);
+        var instrument = (Instrument)Forms[ProductForm].Record;
+        var life = (LifeInputs)Forms[LifeForm].Record;
+        var state = life.State(instrument, market.AsOf, name => market.Underlying(name).Spot);
+        var trade = new Trade("UI", instrument, ((PositionInputs)Forms[PositionForm].Record).Quantity, state);
+        var request = new PricingRequest(
+            trade, market, (ModelConfig)Forms[ModelForm].Record, (EngineConfig)Forms[EngineForm].Record, market.AsOf, AllMeasures);
+        var config = (RiskConfig)Forms[RiskForm].Record;
+        string underlying = _underlying;
+        var others = AvailableEngines.Where(e => e != SelectedEngine).Select(NewEngine).ToArray();
+
+        try
+        {
+            await Task.Delay(Debounce, token);
+            var output = await Task.Run(() => Calculate(request, config, underlying, others, token), token);
+            Show(output);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or NotSupportedException or KeyNotFoundException)
+        {
+            HasError = true;
+            Status = e.Message;
+        }
+    }
+
+    private Output Calculate(
+        PricingRequest request, RiskConfig config, string underlying, EngineConfig[] others, CancellationToken token)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var best = _risk.Compute(request, config);
+        double bestTime = watch.Elapsed.TotalMilliseconds;
+        token.ThrowIfCancellationRequested();
+        // When every greek already comes from bumping, the control would only repeat the calculation.
+        var bumped = best.Greeks.All(g => g.Method == GreekMethod.BumpReprice)
+            ? best
+            : _risk.Compute(request, config with { Preference = GreekPreference.ForceBump });
+
+        double spot = request.Market.Underlying(underlying).Spot;
+        var spots = new double[ProfilePoints];
+        var values = new double[ProfilePoints];
+        var pvOnly = request with { Measures = [] };
+        var preview = pvOnly with { Engine = Preview(request.Engine) };
+        for (int i = 0; i < ProfilePoints; i++)
+        {
+            token.ThrowIfCancellationRequested();
+            double relative = -0.5 + i / (ProfilePoints - 1.0);
+            spots[i] = spot * (1 + relative);
+            var shifted = new SpotBump(underlying, relative).Apply(request.Market);
+            values[i] = _risk.Compute(preview with { Market = shifted }, config).Pv;
+        }
+
+        var engines = ImmutableArray.CreateBuilder<EngineRow>();
+        engines.Add(new EngineRow(best.Engine, best.Pv, best.PvStandardError, bestTime));
+        foreach (var other in others)
+        {
+            token.ThrowIfCancellationRequested();
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            var result = _risk.Compute(pvOnly with { Engine = other }, config);
+            engines.Add(new EngineRow(result.Engine, result.Pv, result.PvStandardError, timer.Elapsed.TotalMilliseconds));
+        }
+
+        return new Output(
+            best, bumped, new ProfileData(spots, values), engines.ToImmutable(), ContentHash.Of(new { request, config }), watch.Elapsed);
+    }
+
+    private void Show(Output output)
+    {
+        PvText = output.Best.PvStandardError is > 0 and var error
+            ? $"{output.Best.Pv:N4} ± {error:N4}"
+            : output.Best.Pv.ToString("N4");
+        HasError = false;
+        string realised = output.Best.Realised == 0 ? "" : $" · déjà versé {output.Best.Realised:N2}";
+        Status = $"{output.Best.Engine} · {output.Elapsed.TotalMilliseconds:F1} ms · hash {output.Hash[..12]}{realised}";
+
+        Greeks.Clear();
+        foreach (var greek in output.Best.Greeks)
+        {
+            double bump = output.Bumped.Greek(greek.Measure, greek.Underlying)!.Value;
+            Greeks.Add(new GreekRow(
+                $"{greek.Measure} {greek.Underlying}".TrimEnd(), greek.Value, greek.StandardError, greek.Method.ToString(), greek.Convention.ToString(),
+                bump, greek.Value - bump));
+        }
+
+        Engines.Clear();
+        foreach (var row in output.Engines) Engines.Add(row);
+        ProfileChanged?.Invoke(output.Profile);
+    }
+}
