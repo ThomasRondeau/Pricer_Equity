@@ -4,6 +4,7 @@ using Pricer.Engines.MonteCarlo;
 using Pricer.Instruments;
 using Pricer.Market;
 using Pricer.Models;
+using Pricer.Native;
 
 namespace Pricer.Engines;
 
@@ -49,6 +50,22 @@ public sealed class PathSimulationEngine : IPricingEngine
         }
 
         var schedule = BuildSchedule(replay.Remaining, request, config);
+        int paths = McSizing.PathsPerBatch(config);
+        double[] means = config.Backend == ComputeBackend.Native
+            ? RunNative(request, config, schedule, replay.Slots, paths)
+            : RunManaged(request, config, schedule, program, replay.Slots, paths);
+        name += FiniteDifferenceEngine.BackendSuffix(config.Backend);
+
+        double mean = means.Average();
+        double variance = means.Sum(m => (m - mean) * (m - mean)) / (config.Batches - 1);
+        return new PricingResult(
+            quantity * (mean + replay.DueToday), Math.Abs(quantity) * Math.Sqrt(variance / config.Batches), name, [], quantity * replay.Realised);
+    }
+
+    private static double[] RunManaged(
+        PricingRequest request, MonteCarloEngineConfig config, Schedule schedule, PayoffProgram program, double[] slots, int paths)
+    {
+        var names = request.Trade.Instrument.Underlyings;
         Func<int, int, IPathBatch> factory = request.Model switch
         {
             LocalVolConfig local => LocalVolFactory(request, local, schedule, config),
@@ -57,12 +74,11 @@ public sealed class PathSimulationEngine : IPricingEngine
             _ => throw new NotSupportedException(request.Model.GetType().Name),
         };
 
-        int paths = McSizing.PathsPerBatch(config);
         var means = new double[config.Batches];
         Parallel.For(0, config.Batches, batch =>
         {
             var evaluator = new PayoffEvaluator(program.Slots, names.Length, paths, 0, 0);
-            evaluator.Seed(replay.Slots);
+            evaluator.Seed(slots);
             var process = factory(batch, paths);
             int date = 0;
             for (int step = 0; step < schedule.Times.Length; step++)
@@ -79,11 +95,28 @@ public sealed class PathSimulationEngine : IPricingEngine
             }
             means[batch] = evaluator.Value.Average();
         });
+        return means;
+    }
 
-        double mean = means.Average();
-        double variance = means.Sum(m => (m - mean) * (m - mean)) / (config.Batches - 1);
-        return new PricingResult(
-            quantity * (mean + replay.DueToday), Math.Abs(quantity) * Math.Sqrt(variance / config.Batches), name, [], quantity * replay.Realised);
+    /// <summary>The same batches in native/src/monte_carlo.cpp, from the same numbers.</summary>
+    private static double[] RunNative(PricingRequest request, MonteCarloEngineConfig config, Schedule schedule, double[] slots, int paths)
+    {
+        int assets = request.Trade.Instrument.Underlyings.Length;
+        var events = schedule.EventsOfDate.SelectMany((group, date) => group.Select(e => (e, date)));
+        var code = PayoffBytecode.Compile(events, slots, assets, schedule.StepOfDate.Length);
+        var steps = new SteppedSchedule(schedule.Times, schedule.StepOfDate, schedule.Discounts, [.. schedule.Forwards.SelectMany(f => f)]);
+        var plan = PayoffBytecode.Plan(config, paths);
+        switch (request.Model)
+        {
+            case LocalVolConfig local:
+                var (grids, bridge) = LocalVolSetup(request, local, schedule, native: true);
+                LocalVolRows[] rows = [.. grids.Select(g => g.Flat()).Select(f => new LocalVolRows(f.Rows, f.Points, f.Low, f.Step))];
+                return NativeCore.LocalVol(code, steps, new LocalVolPaths(rows, PayoffBytecode.Bridge(bridge), local.Correlation), plan);
+            case HestonConfig h:
+                return NativeCore.Heston(code, steps, new HestonPaths(h.V0, h.Kappa, h.Theta, h.Xi, h.Rho), plan);
+            default:
+                throw new NotSupportedException(request.Model.GetType().Name);
+        }
     }
 
     /// <summary>Every event date is a step; longer gaps are cut to the configured frequency.</summary>
@@ -120,6 +153,15 @@ public sealed class PathSimulationEngine : IPricingEngine
     private static Func<int, int, IPathBatch> LocalVolFactory(
         PricingRequest request, LocalVolConfig local, Schedule schedule, MonteCarloEngineConfig config)
     {
+        var (grids, bridge) = LocalVolSetup(request, local, schedule, native: false);
+        return (batch, paths) => new LocalVolBatch(
+            grids, schedule.Times, bridge, local.Correlation, paths, McSizing.BatchSeed(config.Seed, batch));
+    }
+
+    /// <summary>Each surface is read through its own forwards; the grids are shared by all batches.</summary>
+    private static (LocalVolGrid[] Grids, BridgeStep[] Bridge) LocalVolSetup(
+        PricingRequest request, LocalVolConfig local, Schedule schedule, bool native)
+    {
         var snapshot = request.Market;
         var names = request.Trade.Instrument.Underlyings;
         double[] middles = new double[schedule.Times.Length];
@@ -128,12 +170,9 @@ public sealed class PathSimulationEngine : IPricingEngine
             middles[i] = ((i == 0 ? 0 : schedule.Times[i - 1]) + schedule.Times[i]) / 2;
         }
 
-        // Each surface is read through its own forwards; the grids are shared by all batches.
         LocalVolGrid[] grids = [.. names.Select(n => new LocalVolGrid(
-            snapshot.Underlying(n).Vol, t => Forward(snapshot, n, t), middles, local.MinVol, local.MaxVol))];
-        var bridge = BrownianBridge.Build(schedule.Times);
-        return (batch, paths) => new LocalVolBatch(
-            grids, schedule.Times, bridge, local.Correlation, paths, McSizing.BatchSeed(config.Seed, batch));
+            snapshot.Underlying(n).Vol, t => Forward(snapshot, n, t), middles, local.MinVol, local.MaxVol, native))];
+        return (grids, BrownianBridge.Build(schedule.Times));
     }
 
     /// <summary>Euler on y with a common factor for the correlation. y needs no carry: the forward holds it.</summary>

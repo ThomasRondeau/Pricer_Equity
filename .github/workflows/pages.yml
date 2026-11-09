@@ -29,6 +29,11 @@ jobs:
       - name: Install WebAssembly build tools
         run: dotnet workload install wasm-tools-net9
 
+      # The C++ kernels (native/) for the tests, which check them against the managed engines. The web app
+      # compiles the same sources itself with the Emscripten toolchain of the workload.
+      - name: Build the native kernels
+        run: bash native/build.sh
+
       - name: Test the pricing library
         run: dotnet test tests/Pricer.Tests -c Release
 

@@ -8,6 +8,7 @@ using Pricer.Engines;
 using Pricer.Instruments;
 using Pricer.Market;
 using Pricer.Models;
+using Pricer.Native;
 using Pricer.Risk;
 
 namespace Pricer.Presentation;
@@ -108,6 +109,10 @@ public sealed record PricerOptions
 {
     public MonteCarloEngineConfig MonteCarlo { get; init; } = new();
     public int ProfilePoints { get; init; } = 81;
+
+    /// <summary>Where new PDE and Monte Carlo engines run; the engine form can change it. The native kernels give the
+    /// managed results to the last bits and run faster; without the library, engines stay managed.</summary>
+    public ComputeBackend Backend { get; init; } = ComputeBackend.Native;
 }
 
 /// <summary>A greek next to its bump-and-reprice control. When the two conventions differ (a local vol grid delta
@@ -298,10 +303,40 @@ public sealed partial class PricerViewModel : ObservableObject
 
     private EngineConfig NewEngine(EngineKind kind) => kind switch
     {
-        EngineKind.Pde => new PdeEngineConfig(),
-        EngineKind.MonteCarlo => _options.MonteCarlo,
+        EngineKind.Pde => new PdeEngineConfig { Backend = Backend(_options.Backend) },
+        EngineKind.MonteCarlo => _options.MonteCarlo with { Backend = Backend(_options.Backend) },
         _ => new AnalyticEngineConfig(),
     };
+
+    /// <summary>Native only where the library loaded, so that a missing build degrades to the managed engines.</summary>
+    private static ComputeBackend Backend(ComputeBackend wanted) => NativeCore.IsAvailable ? wanted : ComputeBackend.Managed;
+
+    private static EngineConfig WithBackend(EngineConfig config, ComputeBackend backend) => config switch
+    {
+        PdeEngineConfig pde => pde with { Backend = backend },
+        MonteCarloEngineConfig mc => mc with { Backend = backend },
+        _ => config,
+    };
+
+    private static ComputeBackend? BackendOf(EngineConfig config) => config switch
+    {
+        PdeEngineConfig pde => pde.Backend,
+        MonteCarloEngineConfig mc => mc.Backend,
+        _ => null,
+    };
+
+    /// <summary>The selected engine on the other backend first, then the other engines on the selected backend.</summary>
+    private EngineConfig[] Comparisons(EngineConfig selected)
+    {
+        var backend = BackendOf(selected) ?? ComputeBackend.Managed;
+        var others = AvailableEngines.Where(e => e != SelectedEngine).Select(e => WithBackend(NewEngine(e), backend));
+        if (BackendOf(selected) is { } own && NativeCore.IsAvailable)
+        {
+            var other = own == ComputeBackend.Native ? ComputeBackend.Managed : ComputeBackend.Native;
+            others = others.Prepend(WithBackend(selected, other));
+        }
+        return [.. others];
+    }
 
     /// <summary>The profile reprices many times, so Monte Carlo runs lighter there.</summary>
     private static EngineConfig Preview(EngineConfig config) => config is MonteCarloEngineConfig mc
@@ -380,7 +415,7 @@ public sealed partial class PricerViewModel : ObservableObject
             trade, market, (ModelConfig)Forms[ModelForm].Record, (EngineConfig)Forms[EngineForm].Record, market.AsOf, AllMeasures);
         var config = (RiskConfig)Forms[RiskForm].Record;
         string underlying = _underlying;
-        var others = AvailableEngines.Where(e => e != SelectedEngine).Select(NewEngine).ToArray();
+        var others = Comparisons(request.Engine);
 
         IsBusy = true;
         try
@@ -410,7 +445,6 @@ public sealed partial class PricerViewModel : ObservableObject
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var best = _risk.Compute(request, config);
-        double bestTime = watch.Elapsed.TotalMilliseconds;
         await Task.Yield();
         token.ThrowIfCancellationRequested();
         // When every greek already comes from bumping, the control would only repeat the calculation.
@@ -434,9 +468,9 @@ public sealed partial class PricerViewModel : ObservableObject
             values[i] = _risk.Compute(preview with { Market = shifted }, config).Pv;
         }
 
+        // Every row is timed on the PV alone, so that engines and backends compare like for like.
         var engines = ImmutableArray.CreateBuilder<EngineRow>();
-        engines.Add(new EngineRow(best.Engine, best.Pv, best.PvStandardError, bestTime));
-        foreach (var other in others)
+        foreach (var other in others.Prepend(request.Engine))
         {
             await Task.Yield();
             token.ThrowIfCancellationRequested();

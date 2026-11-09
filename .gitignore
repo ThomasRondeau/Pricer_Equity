@@ -484,3 +484,7 @@ $RECYCLE.BIN/
 
 # Documentation locale
 docs/
+
+# Native kernels: CMake build tree and built library
+native/build/
+native/out/

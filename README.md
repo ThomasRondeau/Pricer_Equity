@@ -13,6 +13,9 @@ in your browser; there is no server.
 - **Models**: Black-Scholes, Dupire local vol built from an arbitrage-checked SVI surface, Heston.
 - **Engines**: closed forms, Crank-Nicolson PDE with Rannacher start-up, Monte Carlo with Sobol
   sequences and a Brownian bridge (SIMD, deterministic seeds, standard error always reported).
+- **Native C++ core**: the PDE solver, the Monte Carlo batches and the Dupire local vol grid also run as C++ kernels behind a
+  C ABI, loaded by P/Invoke on the desktop and linked into the WebAssembly build of the demo. They
+  reproduce the managed engines to the last bits and the engine table times both side by side.
 - **Greeks by the best method available** — closed form, semi-analytic, PDE grid, pathwise,
   likelihood ratio — each one labelled with its method and convention and checked against a
   bump-and-reprice control.
@@ -39,6 +42,7 @@ src/
   Pricer.Instruments   term sheets and a payoff language compiled to dated events
   Pricer.Models        Black-Scholes, local vol, Heston, SVI calibration
   Pricer.Engines       analytic, PDE and Monte Carlo engines
+  Pricer.Native        bindings to the C++ kernels of native/
   Pricer.Risk          greeks, model comparison
   Pricer.Book          positions, runs, PnL explain
   Pricer.Data          SQLite storage, IBKR and Yahoo capture
@@ -49,6 +53,30 @@ src/
 tests/Pricer.Tests     reference tests: closed forms, convergence, greek consistency, PnL explain
 ```
 
+## Native core
+
+The C# engines keep products, models, calibration and the choice of greeks; they evaluate everything
+a loop reads into flat arrays and hand those to the kernels of `native/`:
+
+```
+native/
+  include/pricer_core.h   the C ABI: plain structs, error codes, no C++ type crosses it
+  src/pde.cpp             theta scheme with Rannacher steps, Thomas solver, early exercise, local vol
+  src/monte_carlo.cpp     Black-Scholes batches with pathwise and likelihood ratio greeks,
+                          local vol (Euler, correlated baskets) and Heston (Andersen QE) batches
+  src/local_vol.cpp       Dupire local vol from Gatheral's formula on the SVI surface
+  src/payoff_vm.hpp       column evaluator of the payoff programs, with forward-mode tangents
+  src/common.hpp          SplitMix, Sobol, inverse normal, Brownian bridge, batch threads
+src/Pricer.Native         P/Invoke bindings and the CMake build hook
+```
+
+Payoffs reach C++ as postfix bytecode compiled from the payoff language, so structured products
+need no native code of their own. Random numbers, bridge and event order are the managed ones, so
+`tests/Pricer.Tests/NativeParityTests.cs` requires the same PV, standard error and greeks to 1e-12
+on the PDE and the local vol grid, and 1e-9 on Monte Carlo, for every engine and product family. The engine forms carry a
+`Backend` choice (Managed or Native); Native is the default and falls back to Managed when the
+library is missing.
+
 ## Running it
 
 ```powershell
@@ -57,8 +85,11 @@ dotnet run --project src/Pricer.App -c Release      # desktop (Windows)
 dotnet run --project src/Pricer.Web                 # web demo on http://localhost:5145
 ```
 
-Publishing the web demo in Release compiles it ahead of time to WebAssembly and needs
-`dotnet workload install wasm-tools`. The demo's market data is regenerated with
+Building needs CMake and a C++17 compiler for the native core: on Windows, Visual Studio with the
+C++ workload (its bundled CMake is used); on Linux, `cmake` and `g++`. `dotnet build` runs
+`native/build.ps1` or `native/build.sh` itself; set `-p:SkipNativeBuild=true` to skip it.
+The web demo needs `dotnet workload install wasm-tools-net9`, whose Emscripten compiles the same
+C++ sources; publishing in Release also compiles the .NET code ahead of time to WebAssembly. The demo's market data is regenerated with
 `dotnet run --project src/Pricer.Capture -- --export-web src/Pricer.Web/wwwroot/data --ids <capture ids>`.
 
 ## Data

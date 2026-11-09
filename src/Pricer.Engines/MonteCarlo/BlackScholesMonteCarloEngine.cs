@@ -5,6 +5,7 @@ using Pricer.Engines.MonteCarlo;
 using Pricer.Instruments;
 using Pricer.Market;
 using Pricer.Models;
+using Pricer.Native;
 
 namespace Pricer.Engines;
 
@@ -63,8 +64,8 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
         bool wantGreeks = request.Measures.Any(m => m is Measure.Delta or Measure.Gamma or Measure.Vega);
         var setup = Prepare(request, market, program, replay.Slots, x.Vol, config, wantGreeks, pathwise);
 
-        var stats = new double[config.Batches][];
-        Parallel.For(0, config.Batches, batch => stats[batch] = RunBatch(setup, batch));
+        var stats = config.Backend == ComputeBackend.Native ? RunNative(setup) : RunManaged(setup);
+        string name = Name + FiniteDifferenceEngine.BackendSuffix(config.Backend);
 
         double Mean(Stat s) => stats.Average(b => b[(int)s]);
         double Error(Stat s)
@@ -97,7 +98,7 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
             Add(Measure.Vega, Stat.ScoreVega, GreekMethod.LikelihoodRatio, quantity * VolPoint);
         }
         return new PricingResult(
-            quantity * Mean(Stat.Pv) + dueToday, Math.Abs(quantity) * Error(Stat.Pv), Name, greeks.ToImmutable(), realised);
+            quantity * Mean(Stat.Pv) + dueToday, Math.Abs(quantity) * Error(Stat.Pv), name, greeks.ToImmutable(), realised);
     }
 
     private PricingResult Fixed(PricingRequest request, double pv, double realised) => new(pv, 0, Name, [.. request.Measures
@@ -117,6 +118,23 @@ public sealed class BlackScholesMonteCarloEngine : IPricingEngine
         return new Setup(
             program, times, forwards, index, discounts, BrownianBridge.Build(times), market.Spot, vol,
             McSizing.PathsPerBatch(config), config, wantGreeks && pathwise, wantGreeks && !pathwise, slots);
+    }
+
+    private static double[][] RunManaged(Setup s)
+    {
+        var stats = new double[s.Config.Batches][];
+        Parallel.For(0, s.Config.Batches, batch => stats[batch] = RunBatch(s, batch));
+        return stats;
+    }
+
+    /// <summary>The same batches in native/src/monte_carlo.cpp, from the same numbers.</summary>
+    private static double[][] RunNative(Setup s)
+    {
+        var events = s.Program.Events.OrderBy(e => e.Date).Select(e => (e, s.Index[e.Date]));
+        var code = PayoffBytecode.Compile(events, s.Slots, 1, s.Times.Length);
+        var paths = new BlackScholesPaths(
+            s.Times, s.Forwards, s.Discounts, PayoffBytecode.Bridge(s.Bridge), s.Spot, s.Vol, s.Config.Smoothing, s.WantTangents, s.WantScores);
+        return NativeCore.BlackScholes(code, paths, PayoffBytecode.Plan(s.Config, s.Paths));
     }
 
     private static double[] RunBatch(Setup s, int batch)

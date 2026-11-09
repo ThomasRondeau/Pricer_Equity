@@ -27,8 +27,15 @@
     <TrimmerRootAssembly Include="Pricer.Risk" />
     <TrimmerRootAssembly Include="Pricer.Book" />
     <TrimmerRootAssembly Include="Pricer.Presentation" />
+    <TrimmerRootAssembly Include="Pricer.Native" />
     <!-- JSON builds immutable collections through factory methods found by reflection. -->
     <TrimmerRootAssembly Include="System.Collections.Immutable" />
+  </ItemGroup>
+
+  <!-- The C++ kernels, compiled by the Emscripten toolchain of the .NET workload and linked into dotnet.native.wasm.
+       P/Invokes to "pricer_core" resolve against the file of that name. -->
+  <ItemGroup>
+    <NativeFileReference Include="..\..\native\src\*.cpp" />
   </ItemGroup>
 
 </Project>

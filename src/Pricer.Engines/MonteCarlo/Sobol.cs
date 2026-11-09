@@ -38,6 +38,9 @@ public static class Sobol
 
     public static int MaxDimensions => Directions.Length;
 
+    /// <summary>The direction numbers dimension after dimension, for the native kernels.</summary>
+    public static uint[] FlatDirections { get; } = [.. Directions.SelectMany(d => d)];
+
     /// <summary>Writes the first points of one dimension as uniforms strictly inside (0, 1).</summary>
     public static void Fill(int dimension, uint shift, Span<double> uniforms)
     {

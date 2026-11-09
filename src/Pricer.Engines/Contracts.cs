@@ -45,6 +45,14 @@ public enum McGreekChoice
     LikelihoodRatio,
 }
 
+/// <summary>Where a grid or simulation engine runs its loops. Both run the same algorithm on the same numbers:
+/// Managed is the reference, Native the C++ kernels of native/ (Pricer.Native).</summary>
+public enum ComputeBackend
+{
+    Managed,
+    Native,
+}
+
 [JsonPolymorphic]
 [JsonDerivedType(typeof(AnalyticEngineConfig), "analytic")]
 [JsonDerivedType(typeof(PdeEngineConfig), "pde")]
@@ -66,6 +74,11 @@ public sealed record PdeEngineConfig : EngineConfig
 
     [Parameter("Grid width", Group = "Engine", Unit = "std devs", Min = 3, Max = 10)]
     public double Width { get; init; } = 5;
+
+    /// <summary>Left out of the JSON when managed, so that configurations saved before it keep their hash.</summary>
+    [Parameter("Backend", Group = "Engine")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public ComputeBackend Backend { get; init; }
 }
 
 public sealed record MonteCarloEngineConfig : EngineConfig
@@ -90,6 +103,11 @@ public sealed record MonteCarloEngineConfig : EngineConfig
     /// <summary>For the stepped models; Black-Scholes jumps exactly from one event date to the next.</summary>
     [Parameter("Steps per year", Group = "Engine", Min = 4, Max = 365)]
     public int StepsPerYear { get; init; } = 52;
+
+    /// <summary>Left out of the JSON when managed, so that configurations saved before it keep their hash.</summary>
+    [Parameter("Backend", Group = "Engine")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public ComputeBackend Backend { get; init; }
 }
 
 public sealed record PricingRequest(

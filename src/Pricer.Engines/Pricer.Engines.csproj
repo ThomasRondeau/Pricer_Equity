@@ -5,6 +5,7 @@
     <ProjectReference Include="..\Pricer.Market\Pricer.Market.csproj" />
     <ProjectReference Include="..\Pricer.Instruments\Pricer.Instruments.csproj" />
     <ProjectReference Include="..\Pricer.Models\Pricer.Models.csproj" />
+    <ProjectReference Include="..\Pricer.Native\Pricer.Native.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

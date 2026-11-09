@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- The C++ kernels of native/, built by CMake before this project and copied next to every app that uses it.
+       The WebAssembly app links the same sources itself (see Pricer.Web.csproj). -->
+  <PropertyGroup>
+    <NativeRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\native'))</NativeRoot>
+    <NativeLibraryName Condition="'$(OS)' == 'Windows_NT'">pricer_core.dll</NativeLibraryName>
+    <NativeLibraryName Condition="'$(OS)' != 'Windows_NT'">pricer_core.so</NativeLibraryName>
+    <NativeLibraryPath>$(NativeRoot)\out\$(NativeLibraryName)</NativeLibraryPath>
+  </PropertyGroup>
+
+  <Target Name="BuildNative" BeforeTargets="BeforeBuild" Condition="'$(SkipNativeBuild)' != 'true'"
+          Inputs="@(NativeSource);$(NativeRoot)\CMakeLists.txt" Outputs="$(NativeLibraryPath)">
+    <Exec Condition="'$(OS)' == 'Windows_NT'" Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(NativeRoot)\build.ps1&quot;" />
+    <Exec Condition="'$(OS)' != 'Windows_NT'" Command="bash &quot;$(NativeRoot)/build.sh&quot;" />
+  </Target>
+
+  <ItemGroup>
+    <NativeSource Include="$(NativeRoot)\src\**\*;$(NativeRoot)\include\**\*" />
+    <None Include="$(NativeLibraryPath)" Link="$(NativeLibraryName)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(NativeLibraryPath)') or '$(SkipNativeBuild)' != 'true'" />
+  </ItemGroup>
+
+</Project>
