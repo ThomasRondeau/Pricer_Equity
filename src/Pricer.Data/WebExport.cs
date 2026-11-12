@@ -9,6 +9,7 @@ namespace Pricer.Data;
 public static class WebExport
 {
     public const string IndexFile = "index.json";
+    public const string HistoryFile = "history.json";
 
     private static readonly string[] SyntheticUnderlyings = [SyntheticMarketDataProvider.DefaultUnderlying, "SYNTH2"];
 
@@ -63,5 +64,11 @@ public static class WebExport
         }
         File.WriteAllText(Path.Combine(directory, IndexFile), JsonSerializer.Serialize(entries, new JsonSerializerOptions { WriteIndented = true }));
         return entries;
+    }
+
+    public static void WriteHistory(string directory, PriceHistory history)
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, HistoryFile), JsonSerializer.Serialize(history));
     }
 }

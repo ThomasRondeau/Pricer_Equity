@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Pricer.Core;
 using Pricer.Engines;
 using Pricer.Instruments;
@@ -16,9 +17,12 @@ public enum ModelChoice
 
 /// <param name="Source">Local for trades entered here, IBKR for imported ones.</param>
 /// <param name="Model">Overrides the run's choice for this trade.</param>
+/// <param name="Engine">Overrides the run's most exact engine, when the product has it under the model. Left out of
+/// the JSON when absent, so that positions saved before it keep their hash.</param>
 public sealed record Position(
     string Id, Instrument Instrument, double Quantity, string Source = Position.LocalSource, string Tag = "",
-    TradeState? State = null, ModelChoice? Model = null)
+    TradeState? State = null, ModelChoice? Model = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] EngineConfig? Engine = null)
 {
     public const string LocalSource = "Local";
 

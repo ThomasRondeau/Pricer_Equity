@@ -12,6 +12,19 @@ public sealed class CaptureCatalog(HttpClient http)
     public async Task<IReadOnlyList<CaptureIndexEntry>> ListAsync() =>
         await http.GetFromJsonAsync<List<CaptureIndexEntry>>(Folder + "index.json") ?? [];
 
+    /// <summary>Daily closes between the captures; without the file, fixings between dates are interpolated.</summary>
+    public async Task<PriceHistory> LoadHistoryAsync()
+    {
+        try
+        {
+            return await http.GetFromJsonAsync<PriceHistory>(Folder + "history.json") ?? PriceHistory.Empty;
+        }
+        catch (HttpRequestException)
+        {
+            return PriceHistory.Empty;
+        }
+    }
+
     public async Task<StoredCapture> LoadAsync(CaptureIndexEntry entry)
     {
         if (_loaded.TryGetValue(entry.File, out var capture)) return capture;

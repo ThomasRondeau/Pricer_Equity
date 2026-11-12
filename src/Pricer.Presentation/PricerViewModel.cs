@@ -144,17 +144,8 @@ public sealed partial class PricerViewModel : ObservableObject
     private const int MinPreviewPaths = 1024;
     private const int PreviewBatches = 8;
 
-    /// <summary>A small bump on a payoff with jumps measures noise, not a sensitivity.</summary>
-    private const double NoteSpotBump = 0.01;
     private static readonly TimeSpan Debounce = TimeSpan.FromMilliseconds(60);
     private static readonly ImmutableArray<Measure> AllMeasures = [.. Enum.GetValues<Measure>()];
-
-    private static readonly Dictionary<Type, EngineKind> EngineKindOf = new()
-    {
-        [typeof(AnalyticEngineConfig)] = EngineKind.Analytic,
-        [typeof(PdeEngineConfig)] = EngineKind.Pde,
-        [typeof(MonteCarloEngineConfig)] = EngineKind.MonteCarlo,
-    };
 
     private readonly EngineRegistry _registry = EngineRegistry.Default();
     private readonly PricerOptions _options;
@@ -210,12 +201,7 @@ public sealed partial class PricerViewModel : ObservableObject
     {
         var instrument = (Instrument)Forms[ProductForm].Record;
         var state = ((LifeInputs)Forms[LifeForm].Record).State(instrument, _snapshot.AsOf, name => _snapshot.Underlying(name).Spot);
-        var model = SelectedModel switch
-        {
-            ModelKind.LocalVol => ModelChoice.LocalVol,
-            ModelKind.Heston => ModelChoice.Heston,
-            _ => ModelChoice.BlackScholes,
-        };
+        var model = TradeCatalog.Choice(SelectedModel);
         PositionRequested?.Invoke(new Position(
             $"L-{Guid.NewGuid():N}"[..10], instrument, ((PositionInputs)Forms[PositionForm].Record).Quantity,
             Tag: "Pricer", State: state, Model: model));
@@ -233,8 +219,7 @@ public sealed partial class PricerViewModel : ObservableObject
 
     private Type InstrumentType => Forms[ProductForm].Record.GetType();
 
-    private IEnumerable<EngineKind> EnginesFor(ModelKind model) =>
-        _registry.ConfigsFor(InstrumentType, ModelType(model)).Select(c => EngineKindOf[c]).Order();
+    private IEnumerable<EngineKind> EnginesFor(ModelKind model) => TradeCatalog.EnginesFor(_registry, InstrumentType, model);
 
     partial void OnProductKindChanged(ProductKind value)
     {
@@ -280,36 +265,14 @@ public sealed partial class PricerViewModel : ObservableObject
         MarketForm => new("Market (overrides)", new MarketInputs { Spot = _snapshot.Underlying(_underlying).Spot }),
         ModelForm => new($"Model: {SelectedModel}", NewModel(SelectedModel)),
         EngineForm => new($"Engine: {SelectedEngine}", NewEngine(SelectedEngine)),
-        RiskForm => new("Risk", ProductKind >= ProductKind.ReverseConvertible && ProductKind <= ProductKind.WorstOf
-            ? new RiskConfig { SpotBump = NoteSpotBump }
-            : new RiskConfig()),
+        RiskForm => new("Risk", TradeCatalog.NewRisk(ProductKind)),
         LifeForm => new("Trade lifecycle", new LifeInputs()),
         _ => throw new ArgumentOutOfRangeException(nameof(index)),
     };
 
-    private static Type ModelType(ModelKind kind) => kind switch
-    {
-        ModelKind.LocalVol => typeof(LocalVolConfig),
-        ModelKind.Heston => typeof(HestonConfig),
-        _ => typeof(BlackScholesConfig),
-    };
+    private ModelConfig NewModel(ModelKind kind) => TradeCatalog.NewModel(kind, _heston);
 
-    private ModelConfig NewModel(ModelKind kind) => kind switch
-    {
-        ModelKind.LocalVol => new LocalVolConfig(),
-        ModelKind.Heston => _heston,
-        _ => new BlackScholesConfig(),
-    };
-
-    private EngineConfig NewEngine(EngineKind kind) => kind switch
-    {
-        EngineKind.Pde => new PdeEngineConfig { Backend = Backend(_options.Backend) },
-        EngineKind.MonteCarlo => _options.MonteCarlo with { Backend = Backend(_options.Backend) },
-        _ => new AnalyticEngineConfig(),
-    };
-
-    /// <summary>Native only where the library loaded, so that a missing build degrades to the managed engines.</summary>
-    private static ComputeBackend Backend(ComputeBackend wanted) => NativeCore.IsAvailable ? wanted : ComputeBackend.Managed;
+    private EngineConfig NewEngine(EngineKind kind) => TradeCatalog.NewEngine(kind, _options);
 
     private static EngineConfig WithBackend(EngineConfig config, ComputeBackend backend) => config switch
     {
@@ -343,59 +306,7 @@ public sealed partial class PricerViewModel : ObservableObject
         ? mc with { Paths = Math.Max(mc.Paths / PreviewDivisor, MinPreviewPaths), Batches = PreviewBatches }
         : config;
 
-    private Instrument NewInstrument()
-    {
-        double strike = Math.Round(_snapshot.Underlying(_underlying).Spot);
-        var expiry = _snapshot.AsOf.AddYears(1);
-        double spot = _snapshot.Underlying(_underlying).Spot;
-        var start = _snapshot.AsOf;
-        return ProductKind switch
-        {
-            ProductKind.EuropeanOption => new EuropeanOption
-            {
-                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
-            },
-            ProductKind.AmericanOption => new AmericanOption
-            {
-                Underlying = _underlying, Right = OptionRight.Put, Strike = strike, Expiry = expiry,
-            },
-            ProductKind.Digital => new DigitalOption
-            {
-                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
-            },
-            ProductKind.Barrier => new BarrierOption
-            {
-                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
-                Barrier = Math.Round(0.8 * strike), Kind = BarrierKind.DownOut,
-            },
-            ProductKind.Asian => new AsianOption
-            {
-                Underlying = _underlying, Right = OptionRight.Call, Strike = strike, Expiry = expiry,
-                AveragingStart = _snapshot.AsOf.AddMonths(1),
-            },
-            ProductKind.ReverseConvertible => new ReverseConvertible
-            {
-                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = expiry, Protection = 0.8,
-            },
-            ProductKind.Autocall => new Autocall
-            {
-                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = start.AddYears(3),
-            },
-            ProductKind.Phoenix => new Phoenix
-            {
-                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = start.AddYears(3),
-            },
-            ProductKind.WorstOf => new WorstOfPhoenix
-            {
-                Underlying = _underlying, InitialFixing = spot, Start = start, Expiry = start.AddYears(3),
-                Basket = [.. _snapshot.Underlyings.Keys.OrderBy(n => n != _underlying)
-                    .Select(n => new BasketLeg(n, _snapshot.Underlying(n).Spot))],
-            },
-            ProductKind.Forward => new EquityForward { Underlying = _underlying, Strike = strike, Expiry = expiry },
-            ProductKind.Stock => new Stock { Underlying = _underlying },
-            _ => throw new InvalidOperationException(),
-        };
-    }
+    private Instrument NewInstrument() => TradeCatalog.NewInstrument(ProductKind, _snapshot, _underlying);
 
     private sealed record Output(
         PricingResult Best, PricingResult Bumped, ProfileData Profile, ImmutableArray<EngineRow> Engines, string Hash, TimeSpan Elapsed);

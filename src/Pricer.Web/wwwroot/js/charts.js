@@ -1,4 +1,4 @@
-// Chart.js glue for the LineChart component. Colours come from CSS variables so charts follow the page theme.
+// Chart.js glue for the LineChart and WaterfallChart components. Colours come from CSS variables so charts follow the page theme.
 (function () {
     const palette = ["--series-1", "--series-2", "--series-3", "--series-4"];
 
@@ -55,6 +55,42 @@
                         legend: { display: spec.series.length > 1, labels: { color: css("--text") } },
                     },
                     scales: { x: axis(spec.xLabel), y: axis(spec.yLabel) },
+                },
+            });
+        },
+        // Floating bars: each factor spans from the cumulated PnL before it to the one after it; the total starts at zero.
+        waterfall(canvas, spec) {
+            const rise = css("--series-1"), fall = css("--error"), total = css("--text-muted");
+            const data = spec.bars.map(b => [b.from, b.to]);
+            const colours = spec.bars.map(b => b.total ? total : (b.to >= b.from ? rise : fall));
+            Chart.getChart(canvas)?.destroy();
+            new Chart(canvas, {
+                type: "bar",
+                data: { labels: spec.bars.map(b => b.label), datasets: [{ data, backgroundColor: colours, borderWidth: 0 }] },
+                options: {
+                    animation: false,
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: { display: spec.title.length > 0, text: spec.title, color: css("--text") },
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: item => {
+                                    const b = spec.bars[item.dataIndex];
+                                    return (b.total ? "Total " : "") + (b.to - b.from).toLocaleString("en-US", { maximumFractionDigits: 2 });
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: { ticks: { color: css("--text-muted") }, grid: { display: false } },
+                        y: {
+                            title: { display: spec.yLabel.length > 0, text: spec.yLabel, color: css("--text-muted") },
+                            ticks: { color: css("--text-muted") },
+                            grid: { color: css("--grid") },
+                        },
+                    },
                 },
             });
         },

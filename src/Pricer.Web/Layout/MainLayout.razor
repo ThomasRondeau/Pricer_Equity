@@ -10,6 +10,7 @@
     <nav class="tabs" aria-label="Pages">
         <NavLink href="" Match="NavLinkMatch.All">Pricer</NavLink>
         <NavLink href="model-lab">Model Lab</NavLink>
+        <NavLink href="pnl-explain">PnL Explain</NavLink>
     </nav>
     <div class="market-picker">
         <label>
@@ -44,7 +45,7 @@
 </main>
 
 <footer class="footer">
-    <span>Market data: synthetic SVI surface, and Yahoo Finance option chains captured on 2026-10-30, recalibrated here. Demo use only, not investment advice.</span>
+    <span>Market data: synthetic SVI surface, Yahoo Finance option chains captured on @Dates, recalibrated here, and Yahoo daily closes in between. Demo use only, not investment advice.</span>
     <span>Every price is computed live in WebAssembly: no server involved.</span>
 </footer>
 
@@ -56,6 +57,9 @@
     }
 
     private void Refresh() => _ = InvokeAsync(StateHasChanged);
+
+    private string Dates => string.Join(", ", Session.Captures.Where(c => c.Source != "Synthetic").Select(c => c.AsOf).Distinct().Order()
+        .Select(d => d.ToString("yyyy-MM-dd")));
 
     private async Task OnCapture(ChangeEventArgs e)
     {

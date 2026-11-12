@@ -238,7 +238,7 @@ public sealed class PnlExplainer(EngineRegistry registry)
             {
                 var model = Model(p, market, config, start, fit, fits);
                 var request = new PricingRequest(
-                    p.ToTrade(), market, model, engine.ResolveEngine(p.Instrument, model, config), market.AsOf, []);
+                    p.ToTrade(), market, model, engine.ResolveEngine(p, model, config), market.AsOf, []);
                 return Worth(risk.Compute(request, config.RiskFor(p.Instrument)));
             }
 

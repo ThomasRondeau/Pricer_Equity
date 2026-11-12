@@ -91,7 +91,7 @@ public sealed class RunEngine(EngineRegistry registry, IRunCache cache)
             points = Points(instrument, market);
             var choice = config.ModelFor(position);
             model = Model(choice, instrument, market, config, heston);
-            engine = ResolveEngine(instrument, model, config);
+            engine = ResolveEngine(position, model, config);
 
             var riskConfig = config.RiskFor(instrument);
             hash = Hash(position, market, model, engine, riskConfig);
@@ -121,6 +121,17 @@ public sealed class RunEngine(EngineRegistry registry, IRunCache cache)
         _ => new BlackScholesConfig(),
     };
 
+    /// <summary>The engine the position asks for when the product has it under this model, else the most exact one.</summary>
+    public EngineConfig ResolveEngine(Position position, ModelConfig model, RunConfig config)
+    {
+        if (position.Engine is { } wanted
+            && registry.ConfigsFor(position.Instrument.GetType(), model.GetType()).Contains(wanted.GetType()))
+        {
+            return wanted;
+        }
+        return ResolveEngine(position.Instrument, model, config);
+    }
+
     /// <summary>The most exact engine the product has under this model.</summary>
     public EngineConfig ResolveEngine(Instrument instrument, ModelConfig model, RunConfig config)
     {
@@ -146,10 +157,12 @@ public sealed class RunEngine(EngineRegistry registry, IRunCache cache)
     {
         var dated = instrument as IDatedProduct;
         double t = dated is null ? 1 : Math.Max(DayCount.Act365F.YearFraction(market.AsOf, dated.Expiry), 1 / 365.0);
+        double mainSpot = market.Underlying(instrument.Underlying).Spot;
         return [.. instrument.Underlyings.Select(name =>
         {
             var underlying = market.Underlying(name);
-            double strike = dated?.ReferenceStrike ?? underlying.Spot;
+            // The reference strike is quoted on the main underlying: the other legs read it at the same moneyness.
+            double strike = dated?.ReferenceStrike * underlying.Spot / mainSpot ?? underlying.Spot;
             return new MarketPoint(name, underlying.Spot, underlying.Vol.Vol(strike, t), market.DiscountCurve.ZeroRate(t));
         })];
     }

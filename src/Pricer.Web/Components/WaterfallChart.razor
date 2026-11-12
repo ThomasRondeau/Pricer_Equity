@@ -1,0 +1,44 @@
+@* PnL waterfall: one floating bar per factor, then the total, drawn by pricerCharts.waterfall (wwwroot/js/charts.js). *@
+@using Pricer.Book
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+<div class="chart" style="height: @(Height)px">
+    <canvas @ref="_canvas" role="img" aria-label="@Title"></canvas>
+</div>
+
+@code {
+    private ElementReference _canvas;
+    private PnlRow? _drawn;
+
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public int Height { get; set; } = 320;
+    [Parameter, EditorRequired] public PnlRow Row { get; set; } = default!;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (ReferenceEquals(_drawn, Row)) return;
+        _drawn = Row;
+        var bars = new List<object>();
+        double level = 0;
+        foreach (var factor in Enum.GetValues<PnlFactor>())
+        {
+            double amount = Row[factor];
+            bars.Add(new { label = ParameterFormView.Spaced(factor.ToString()), from = level, to = level + amount, total = false });
+            level += amount;
+        }
+        bars.Add(new { label = "Total", from = 0.0, to = level, total = true });
+        await JS.InvokeVoidAsync("pricerCharts.waterfall", _canvas, new { title = Title, yLabel = "PnL", bars });
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("pricerCharts.dispose", _canvas);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+}

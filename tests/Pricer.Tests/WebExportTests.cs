@@ -35,6 +35,25 @@ public class WebExportTests
         }
     }
 
+    [Fact]
+    public void HistoryReadsBackWithItsCloses()
+    {
+        var history = new PriceHistory(ImmutableSortedDictionary<string, ImmutableArray<DailyClose>>.Empty
+            .Add("^SPX", [new DailyClose(AsOf, 7580.07), new DailyClose(AsOf.AddDays(3), 7541.4)]));
+        string directory = Path.Combine(Path.GetTempPath(), $"pricer-web-{Guid.NewGuid():N}");
+        try
+        {
+            WebExport.WriteHistory(directory, history);
+            var read = JsonSerializer.Deserialize<PriceHistory>(File.ReadAllText(Path.Combine(directory, WebExport.HistoryFile)))!;
+            Assert.Equal(history.Closes["^SPX"].ToArray(), read.Closes["^SPX"].ToArray());
+            Assert.Equal(7580.07, read.On("^SPX", AsOf.AddDays(2))!.Close);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     /// <summary>Local vol through the PDE reads the whole SVI surface, so any loss in the round trip shows up.</summary>
     private static double Price(MarketSnapshot snapshot)
     {

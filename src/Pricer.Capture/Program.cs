@@ -14,7 +14,7 @@ Console.CancelKeyPress += (_, e) =>
 
 try
 {
-    // --export-web <directory> [--ids 1,2] [--as-of yyyy-MM-dd]: static data for the web demo, read-only on the database.
+    // --export-web <directory> [--ids 1,2] [--as-of yyyy-MM-dd] [--history]: static data for the web demo, read-only on the database.
     int export = Array.IndexOf(args, "--export-web");
     if (export >= 0)
     {
@@ -36,6 +36,22 @@ try
         foreach (var entry in WebExport.Write(directory, captures))
         {
             Console.WriteLine($"{entry.File}: {entry.Label}");
+        }
+
+        // --history: daily closes of the Yahoo underlyings between the first and last capture, for fixings and barriers.
+        if (args.Contains("--history"))
+        {
+            var real = captures.Where(c => c.Item2 == "Yahoo").Select(c => c.Item3.Snapshot).ToList();
+            if (real.Count == 0) throw new InvalidOperationException("--history needs at least one Yahoo capture.");
+            var (first, last) = (real.Min(s => s.AsOf), real.Max(s => s.AsOf));
+            using var history = new YahooOptionChainSource();
+            var closes = System.Collections.Immutable.ImmutableSortedDictionary<string, System.Collections.Immutable.ImmutableArray<Pricer.Models.DailyClose>>.Empty;
+            foreach (string name in real.SelectMany(s => s.Underlyings.Keys).Distinct().Order())
+            {
+                closes = closes.Add(name, await history.FetchClosesAsync(name, first, last, cancel.Token));
+                Console.WriteLine($"{WebExport.HistoryFile}: {name}, {closes[name].Length} closes from {first:yyyy-MM-dd} to {last:yyyy-MM-dd}");
+            }
+            WebExport.WriteHistory(directory, new Pricer.Models.PriceHistory(closes));
         }
         foreach (string line in skipped) Console.WriteLine($"  skipped {line}");
         return 0;

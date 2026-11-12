@@ -5,7 +5,7 @@ using Pricer.Risk;
 
 namespace Pricer.Web.Services;
 
-/// <summary>The market chosen in the header, pushed to both pages. Same wiring as the desktop MainViewModel.</summary>
+/// <summary>The market chosen in the header, pushed to every page. Same wiring as the desktop MainViewModel.</summary>
 public sealed class DemoSession
 {
     private readonly CaptureCatalog _catalog;
@@ -32,6 +32,10 @@ public sealed class DemoSession
 
     public PricerViewModel Pricer { get; } = new(BrowserOptions);
     public ModelLabViewModel ModelLab { get; } = new();
+
+    /// <summary>Its own trade, explained between two captures of the header's underlying.</summary>
+    public PnlExplainViewModel PnlExplain { get; } = new(BrowserOptions);
+    public PriceHistory History { get; private set; } = PriceHistory.Empty;
     public IReadOnlyList<CaptureIndexEntry> Captures { get; private set; } = [];
     public CaptureIndexEntry? Capture { get; private set; }
     public string Underlying { get; private set; } = "";
@@ -54,6 +58,7 @@ public sealed class DemoSession
             Fit = null;
             Pricer.UseMarket(capture.Snapshot, name);
             ModelLab.Use(capture.Snapshot, name, report);
+            await PnlExplain.UseAsync(Captures, _catalog.LoadAsync, History, name);
         }
         catch (Exception e) when (e is HttpRequestException or InvalidDataException or System.Text.Json.JsonException)
         {
@@ -68,6 +73,7 @@ public sealed class DemoSession
         try
         {
             Captures = await _catalog.ListAsync();
+            History = await _catalog.LoadHistoryAsync();
         }
         catch (HttpRequestException e)
         {

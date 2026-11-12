@@ -25,7 +25,8 @@ public sealed class NumberField(ParameterDescriptor descriptor, double initial, 
         set
         {
             double number = isInteger ? Math.Round(value) : value;
-            if (SetProperty(ref _value, number)) Commit(isInteger ? (int)number : number);
+            // Boxed apart: in one conditional the int would widen back to double.
+            if (SetProperty(ref _value, number)) Commit(isInteger ? (object)(int)number : number);
         }
     }
 }

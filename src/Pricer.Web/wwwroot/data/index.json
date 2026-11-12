@@ -27,5 +27,15 @@
       "^SPX",
       "SPY"
     ]
+  },
+  {
+    "File": "capture-4.json",
+    "Label": "Yahoo \u00B7 2026-11-12 \u00B7 ^SPX, SPY",
+    "AsOf": "2026-11-12",
+    "Source": "Yahoo",
+    "Underlyings": [
+      "^SPX",
+      "SPY"
+    ]
   }
 ]

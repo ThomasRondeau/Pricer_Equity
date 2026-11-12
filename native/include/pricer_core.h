@@ -2,7 +2,7 @@
  *
  * The C# side keeps products, models, calibration and greek selection; it prepares flat arrays and calls
  * these kernels for the loops that dominate the run time. Every struct is plain data with the layout of its
- * twin in Pricer.Native/NativeStructs.cs: change both together. No C++ type or exception crosses the boundary;
+ * twin in Pricer.Native/Interop.cs: change both together. No C++ type or exception crosses the boundary;
  * functions return PC_OK or an error code, with a message from pc_last_error(). */
 #ifndef PRICER_CORE_H
 #define PRICER_CORE_H

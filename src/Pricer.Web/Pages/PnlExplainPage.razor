@@ -1,0 +1,214 @@
+@page "/pnl-explain"
+@inherits ViewModelComponent<Pricer.Presentation.PnlExplainViewModel>
+@inject DemoSession Session
+@using Pricer.Models
+@using Pricer.Presentation
+@* Options carry "selected" rather than the select a "value": Blazor sets a select value before its options exist. *@
+
+<PageTitle>PnL Explain · Equity Pricer</PageTitle>
+
+<section class="intro">
+    <h1>PnL Explain</h1>
+    <p>
+        Build a trade as on the Pricer page, struck on a first market capture, and explain its PnL up to a later capture.
+        The trade is priced on both dates, then walked from one to the other factor by factor in full revaluation:
+        time, life events (fixings, coupons, calls, barriers, read from the daily closes in between), spot, dividends,
+        vol level and shape, rates. A greeks explain from the first date runs alongside; its residual shows what
+        local sensitivities miss. Extra days and shocks can be added on top of the second capture.
+    </p>
+</section>
+
+<div class="workspace">
+    <aside class="inputs">
+        <fieldset class="form-card">
+            <legend>Dates · @Session.Underlying</legend>
+            <label class="field">
+                <span class="field-label">From</span>
+                <select @onchange="OnFrom" disabled="@(ViewModel.Starts.Count == 0 || ViewModel.IsBusy)">
+                    @foreach (var capture in ViewModel.Starts)
+                    {
+                        <option value="@capture.File" selected="@(capture == ViewModel.From)">@capture.Label</option>
+                    }
+                </select>
+            </label>
+            <label class="field">
+                <span class="field-label">To</span>
+                <select @onchange="OnTo" disabled="@(ViewModel.Ends.Count == 0 || ViewModel.IsBusy)">
+                    @foreach (var capture in ViewModel.Ends)
+                    {
+                        <option value="@capture.File" selected="@(capture == ViewModel.To)">@capture.Label</option>
+                    }
+                </select>
+            </label>
+        </fieldset>
+        <fieldset class="form-card">
+            <legend>Setup</legend>
+            <label class="field">
+                <span class="field-label">Product</span>
+                <select @onchange="e => ViewModel.ProductKind = Enum.Parse<ProductKind>(e.Value!.ToString()!)">
+                    @foreach (ProductKind kind in ViewModel.ProductKinds)
+                    {
+                        <option value="@kind" selected="@(kind == ViewModel.ProductKind)">@ParameterFormView.Spaced(kind.ToString())</option>
+                    }
+                </select>
+            </label>
+            <label class="field">
+                <span class="field-label">Model</span>
+                <select @onchange="e => ViewModel.SelectedModel = Enum.Parse<ModelKind>(e.Value!.ToString()!)">
+                    @foreach (var model in ViewModel.AvailableModels)
+                    {
+                        <option value="@model" selected="@(model == ViewModel.SelectedModel)">@ParameterFormView.Spaced(model.ToString())</option>
+                    }
+                </select>
+            </label>
+            <label class="field">
+                <span class="field-label">Engine</span>
+                <select @onchange="e => ViewModel.SelectedEngine = Enum.Parse<EngineKind>(e.Value!.ToString()!)">
+                    @foreach (var engine in ViewModel.AvailableEngines)
+                    {
+                        <option value="@engine" selected="@(engine == ViewModel.SelectedEngine)">@(engine == EngineKind.Pde ? "PDE" : ParameterFormView.Spaced(engine.ToString()))</option>
+                    }
+                </select>
+            </label>
+            @if (ViewModel.ModelNote.Length > 0)
+            {
+                <p class="muted small">@ViewModel.ModelNote</p>
+            }
+        </fieldset>
+        <div class="actions">
+            <button class="primary" @onclick="() => ViewModel.ExplainCommand.ExecuteAsync(null)" disabled="@ViewModel.IsBusy">Explain</button>
+            <button @onclick="() => ViewModel.ExplainCancelCommand.Execute(null)" disabled="@(!ViewModel.IsBusy)">Cancel</button>
+        </div>
+        @foreach (var form in ViewModel.Forms.Where(f => f.Fields.Count > 0))
+        {
+            <ParameterFormView Form="form" />
+        }
+        <ParameterFormView Form="ViewModel.ScenarioForm" />
+        <ParameterFormView Form="ViewModel.ExplainForm" />
+    </aside>
+
+    <section class="results">
+        <div class="pv-card" aria-live="polite">
+            <div>
+                <div class="pv-label">PnL · @ViewModel.MarketLabel</div>
+                <div class="pv-value">@(ViewModel.Waterfall is { } row ? row.Total.ToString("N2") : "—")</div>
+            </div>
+            <div class="pv-status">
+                @if (ViewModel.IsBusy)
+                {
+                    <span class="busy">Computing…</span>
+                }
+                <span class="muted">@(ViewModel.Status.Length > 0 || ViewModel.IsBusy ? ViewModel.Status : "Press Explain to price the trade on both dates and split its PnL.")</span>
+            </div>
+        </div>
+
+        @if (ViewModel.Summary.Length > 0)
+        {
+            <p>@ViewModel.Summary</p>
+        }
+        @if (ViewModel.Warnings.Length > 0)
+        {
+            <div class="banner error" role="status">@ViewModel.Warnings</div>
+        }
+
+        <h2>Waterfall <span class="muted small">(full revaluation, in the order of the Explain form)</span></h2>
+        @if (ViewModel.Waterfall is { } waterfall)
+        {
+            <WaterfallChart Title="PnL by factor" Row="waterfall" />
+        }
+        else
+        {
+            <div class="placeholder muted">The waterfall appears here once the trade is explained.</div>
+        }
+
+        <h2>Full revaluation vs greeks</h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr><th>Factor</th><th class="num">Full revaluation</th><th class="num">Greeks</th><th class="num">Gap</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var line in ViewModel.Factors)
+                    {
+                        <tr>
+                            <td>@line.Factor</td>
+                            <td class="num">@line.Waterfall.ToString("N4")</td>
+                            <td class="num">@line.Greeks.ToString("N4")</td>
+                            <td class="num">@line.Gap.ToString("N4")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <h2>Market moves <span class="muted small">(vol at the trade's reference strike and expiry, zero rate to expiry)</span></h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Underlying</th><th class="num">Spot from</th><th class="num">Spot to</th><th class="num">Vol from</th>
+                        <th class="num">Vol to</th><th class="num">Rate from</th><th class="num">Rate to</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var move in ViewModel.Moves)
+                    {
+                        <tr>
+                            <td>@move.Underlying</td>
+                            <td class="num">@move.SpotFrom.ToString("N2")</td>
+                            <td class="num">@move.SpotTo.ToString("N2")</td>
+                            <td class="num">@move.VolFrom.ToString("P2")</td>
+                            <td class="num">@move.VolTo.ToString("P2")</td>
+                            <td class="num">@move.RateFrom.ToString("P3")</td>
+                            <td class="num">@move.RateTo.ToString("P3")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <h2>Fixings between the dates</h2>
+        @if (ViewModel.Fixings.Count > 0)
+        {
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Date</th><th>Underlying</th><th class="num">Level</th><th>Source</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var fixing in ViewModel.Fixings)
+                        {
+                            <tr>
+                                <td>@fixing.Date</td>
+                                <td>@fixing.Underlying</td>
+                                <td class="num">@fixing.Level.ToString("N2")</td>
+                                <td>@fixing.Source</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else if (ViewModel.Waterfall is not null)
+        {
+            <p class="muted small">
+                No observation date falls between the two markets. Add extra days to reach the trade's observations:
+                past the last daily close, fixings follow a geometric path to the shocked spot.
+            </p>
+        }
+    </section>
+</div>
+
+@code {
+    protected override PnlExplainViewModel ViewModel => Session.PnlExplain;
+
+    private async Task OnFrom(ChangeEventArgs e)
+    {
+        if (ViewModel.Starts.FirstOrDefault(c => c.File == e.Value?.ToString()) is { } entry) await ViewModel.SelectFromAsync(entry);
+    }
+
+    private void OnTo(ChangeEventArgs e)
+    {
+        if (ViewModel.Ends.FirstOrDefault(c => c.File == e.Value?.ToString()) is { } entry) ViewModel.To = entry;
+    }
+}

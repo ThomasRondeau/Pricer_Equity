@@ -22,6 +22,9 @@ in your browser; there is no server.
 - **Book and runs** (desktop): positions from IBKR plus local trades, cached runs, run diffs down
   to the parameter, and a full-revaluation **PnL explain** waterfall cross-checked with a greeks
   explain.
+- **PnL explain in the browser**: one trade, built as on the Pricer page, explained between two real
+  market captures, with fixings and barrier checks read from the daily closes in between. Extra days and
+  spot, vol and rate shocks can be added on top.
 
 ## Design
 
@@ -48,7 +51,7 @@ src/
   Pricer.Data          SQLite storage, IBKR and Yahoo capture
   Pricer.Presentation  view models shared by both front ends
   Pricer.App           WPF desktop application
-  Pricer.Web           Blazor WebAssembly demo (Pricer and Model Lab pages)
+  Pricer.Web           Blazor WebAssembly demo (Pricer, Model Lab and PnL Explain pages)
   Pricer.Capture       daily market capture and web data export
 tests/Pricer.Tests     reference tests: closed forms, convergence, greek consistency, PnL explain
 ```
@@ -89,10 +92,14 @@ Building needs CMake and a C++17 compiler for the native core: on Windows, Visua
 C++ workload (its bundled CMake is used); on Linux, `cmake` and `g++`. `dotnet build` runs
 `native/build.ps1` or `native/build.sh` itself; set `-p:SkipNativeBuild=true` to skip it.
 The web demo needs `dotnet workload install wasm-tools-net9`, whose Emscripten compiles the same
-C++ sources; publishing in Release also compiles the .NET code ahead of time to WebAssembly. The demo's market data is regenerated with
+C++ sources; publishing in Release also compiles the .NET code ahead of time to WebAssembly. On every push to `main`, `.github/workflows/pages.yml` builds the C++ kernels on Linux, runs
+the tests (native parity included), publishes the demo ahead of time and deploys it to GitHub Pages.
+The demo's market data is regenerated with
 `dotnet run --project src/Pricer.Capture -- --export-web src/Pricer.Web/wwwroot/data --ids <capture ids>`.
 
 ## Data
 
-The demo ships a synthetic SVI market and two Yahoo Finance option chain captures from
-2026-10-30, recalibrated by the library. They are for demonstration only.
+The demo ships a synthetic SVI market, Yahoo Finance option chain captures from 2026-10-30 and
+2026-11-12, recalibrated by the library, and the Yahoo daily closes between them. They are for
+demonstration only. Yahoo has no option chain history, so each new date comes from a new capture
+(`--yahoo`), exported with `--export-web <dir> --ids <ids> --history`.

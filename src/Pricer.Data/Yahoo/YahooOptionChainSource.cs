@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using Pricer.Market;
+using Pricer.Models;
 
 namespace Pricer.Data.Yahoo;
 
@@ -13,6 +14,7 @@ public sealed class YahooOptionChainSource : IOptionChainSource, IDisposable
     private const string UserAgent = "Mozilla/5.0";
     private const string QuoteUrl = "https://query1.finance.yahoo.com/v7/finance/quote";
     private const string OptionsUrl = "https://query2.finance.yahoo.com/v7/finance/options/";
+    private const string ChartUrl = "https://query1.finance.yahoo.com/v8/finance/chart/";
     private static readonly TimeSpan Pacing = TimeSpan.FromMilliseconds(300);
 
     /// <summary>Treasury yield indices, in percent, by maturity in years.</summary>
@@ -81,6 +83,37 @@ public sealed class YahooOptionChainSource : IOptionChainSource, IDisposable
             throw new InvalidOperationException($"{request.Symbol}: no bid/ask quote (market closed or empty quotes).");
         }
         return new OptionChain(request.Symbol, marketDate, spot, request.Exercise, [.. quotes]);
+    }
+
+    /// <summary>Daily closes from <paramref name="from"/> to <paramref name="to"/>, both included.</summary>
+    public async Task<ImmutableArray<DailyClose>> FetchClosesAsync(string symbol, DateOnly from, DateOnly to, CancellationToken token)
+    {
+        long start = new DateTimeOffset(from.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).ToUnixTimeSeconds();
+        long end = new DateTimeOffset(to.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).ToUnixTimeSeconds();
+        using var document = await GetAsync(
+            $"{ChartUrl}{Uri.EscapeDataString(symbol)}?period1={start}&period2={end}&interval=1d", token);
+        return [.. ParseCloses(document.RootElement).Where(c => c.Date >= from && c.Date <= to)];
+    }
+
+    /// <summary>Reads a chart response. Bars are dated in the exchange's time zone; days without a close are skipped.</summary>
+    public static ImmutableArray<DailyClose> ParseCloses(JsonElement chartRoot)
+    {
+        var results = chartRoot.GetProperty("chart").GetProperty("result");
+        if (results.ValueKind != JsonValueKind.Array || results.GetArrayLength() == 0) return [];
+        var result = results[0];
+        long offset = result.GetProperty("meta").TryGetProperty("gmtoffset", out var gmt) ? gmt.GetInt64() : 0;
+        if (!result.TryGetProperty("timestamp", out var stamps)) return [];
+        var closes = result.GetProperty("indicators").GetProperty("quote")[0].GetProperty("close");
+
+        var days = new SortedDictionary<DateOnly, double>();
+        int i = 0;
+        foreach (var stamp in stamps.EnumerateArray())
+        {
+            var close = closes[i++];
+            if (close.ValueKind != JsonValueKind.Number) continue;
+            days[Date(stamp.GetInt64() + offset)] = close.GetDouble();
+        }
+        return [.. days.Select(d => new DailyClose(d.Key, d.Value))];
     }
 
     /// <summary>Reads one expiry of an options response. Missing bids and asks become zero.</summary>
